@@ -76,6 +76,21 @@
     <path d="M8 5.5v13l11-6.5z" fill="currentColor" stroke="none" />
   {:else if name === 'stop'}
     <rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" stroke="none" />
+  {:else if name === 'monitor'}
+    <rect x="2" y="4" width="20" height="13" rx="2" />
+    <line x1="8" y1="21" x2="16" y2="21" />
+    <line x1="12" y1="17" x2="12" y2="21" />
+  {:else if name === 'app'}
+    <rect x="3" y="3" width="7" height="7" rx="1.5" />
+    <rect x="14" y="3" width="7" height="7" rx="1.5" />
+    <rect x="14" y="14" width="7" height="7" rx="1.5" />
+    <rect x="3" y="14" width="7" height="7" rx="1.5" />
+  {:else if name === 'check'}
+    <path d="M5 12.5 10 17.5 19 6.5" />
+  {:else if name === 'mic'}
+    <path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z" />
+    <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+    <line x1="12" x2="12" y1="19" y2="22" />
   {:else if name === 'clock'}
     <circle cx="12" cy="12" r="10" />
     <path d="M12 6v6l4 2" />

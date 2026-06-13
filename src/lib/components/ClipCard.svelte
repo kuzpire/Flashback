@@ -9,6 +9,17 @@
 
   const open = $derived(menu.openId === clip.id);
 
+  let video = $state<HTMLVideoElement | null>(null);
+
+  function playPreview() {
+    video?.play().catch(() => {});
+  }
+  function stopPreview() {
+    if (!video) return;
+    video.pause();
+    video.currentTime = 0;
+  }
+
   function toggleMenu(e: MouseEvent) {
     e.stopPropagation();
     menu.openId = open ? null : clip.id;
@@ -17,12 +28,23 @@
 
 <svelte:window onclick={() => (menu.openId = null)} />
 
-<article class="card" class:open>
+<article class="card" class:open onmouseenter={playPreview} onmouseleave={stopPreview}>
   <div class="thumb" style:background={thumbBackground(clip.id)}>
-    <div class="watermark"><Icon name="chevrons" size={150} sw={1.1} /></div>
+    {#if clip.previewSrc}
+      <video
+        bind:this={video}
+        class="preview"
+        src={clip.previewSrc}
+        poster={clip.poster}
+        muted
+        loop
+        playsinline
+        preload="metadata"
+      ></video>
+    {:else}
+      <div class="watermark"><Icon name="chevrons" size={150} sw={1.1} /></div>
+    {/if}
     <div class="scrim"></div>
-
-    <button class="play" aria-label="Reproducir"><Icon name="play" size={22} /></button>
 
     <div class="badge mono">
       {#if clip.trimmed}<Icon name="scissors" size={12} sw={1.9} />{/if}
@@ -75,11 +97,11 @@
     border-radius: 4px;
   }
   .card:hover {
-    outline: 5px solid rgba(160, 167, 182, 0.3);
+    outline: 4px solid rgba(160, 167, 182, 0.3);
   }
   .card.open {
     z-index: 30;
-    outline: 5px solid rgba(160, 167, 182, 0.3);
+    outline: 4px solid rgba(160, 167, 182, 0.3);
   }
 
   .thumb {
@@ -102,25 +124,13 @@
     background: linear-gradient(to bottom, rgba(0, 0, 0, 0.28), transparent 30%, transparent 62%, rgba(0, 0, 0, 0.34));
   }
 
-  .play {
+  .preview {
     position: absolute;
     inset: 0;
-    margin: auto;
-    width: 50px;
-    height: 50px;
-    display: grid;
-    place-items: center;
-    border-radius: 999px;
-    color: var(--on-accent);
-    background: var(--accent);
-    box-shadow: 0 0 0 6px rgba(63, 109, 245, 0.18), 0 8px 20px -6px var(--accent-glow);
-    opacity: 0;
-    transform: scale(0.8);
-    transition: opacity 0.16s ease, transform 0.16s ease;
-  }
-  .card:hover .play {
-    opacity: 1;
-    transform: scale(1);
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
   }
 
   .badge {

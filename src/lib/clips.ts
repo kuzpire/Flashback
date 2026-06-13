@@ -8,6 +8,8 @@ export type Clip = {
   trimmed?: boolean;
   edited?: boolean;
   favorite?: boolean;
+  previewSrc?: string;
+  poster?: string;
 };
 
 const MB = 1024 * 1024;
