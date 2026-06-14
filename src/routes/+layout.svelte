@@ -5,15 +5,16 @@
   import Icon from '$lib/components/Icon.svelte';
   import WindowControls from '$lib/components/WindowControls.svelte';
   import { invoke } from '@tauri-apps/api/core';
-  import { register, unregister, isRegistered } from '@tauri-apps/plugin-global-shortcut';
+  import { register, unregisterAll } from '@tauri-apps/plugin-global-shortcut';
+  import { getCurrentWindow } from '@tauri-apps/api/window';
+  import { hotkeys, capture, labelFor } from '$lib/hotkeys.svelte';
+  import { ui, iconSrc } from '$lib/theme.svelte';
 
   let { children } = $props();
 
-  const RECORD_HOTKEY = 'Alt+F9';
-
   const nav = [
-    { href: '/', icon: 'clips', label: 'Clips' },
-    { href: '/favoritos', icon: 'bookmark', label: 'Favoritos' }
+    { href: '/', icon: 'clips-fill', label: 'Clips' },
+    { href: '/favoritos', icon: 'bookmark-fill', label: 'Favoritos' }
   ];
 
   const isActive = (href: string) =>
@@ -45,6 +46,14 @@
   let capPoll: ReturnType<typeof setInterval> | null = null;
   let lastFrames = 0;
   let lastTime = 0;
+
+  let notice = $state<string | null>(null);
+  let noticeTimer: ReturnType<typeof setTimeout> | null = null;
+  function setNotice(msg: string | null) {
+    notice = msg;
+    if (noticeTimer) clearTimeout(noticeTimer);
+    if (msg) noticeTimer = setTimeout(() => (notice = null), 6000);
+  }
 
   const activeMonitor = $derived(monitors.find((m) => m.id === selectedMonitor) ?? null);
 
@@ -120,15 +129,27 @@
   }
 
   async function startRecording() {
-    if (recording || !selectedMonitor) return;
+    if (recording) return;
+    if (monitors.length === 0) await loadMonitors();
+    // En modo Aplicación aún no capturamos la ventana del juego (CreateForWindow
+    // pendiente): de momento caemos a la pantalla principal para que el atajo grabe.
+    const target =
+      selectedMonitor ?? monitors.find((m) => m.primary)?.id ?? monitors[0]?.id ?? null;
+    if (!target) {
+      setNotice('No se encontró ninguna pantalla para capturar.');
+      return;
+    }
+    setNotice('Iniciando grabación…');
     try {
-      await invoke('start_capture', { monitorId: selectedMonitor });
+      await invoke('start_capture', { monitorId: target });
+      setNotice(null);
       recording = true;
       lastFrames = 0;
       lastTime = performance.now();
       capPoll = setInterval(pollStatus, 1000);
-    } catch {
-      // fuera de Tauri (preview en navegador)
+    } catch (e) {
+      setNotice(`No se pudo iniciar la grabación: ${e}`);
+      console.error('start_capture', e);
     }
   }
 
@@ -137,15 +158,32 @@
     stopPolling();
     recording = false;
     try {
-      await invoke('stop_capture');
-    } catch {
-      // fuera de Tauri (preview en navegador)
+      const path = await invoke<string | null>('stop_capture');
+      setNotice(path ? `Clip guardado: ${path}` : 'Grabación detenida (no se guardó archivo).');
+    } catch (e) {
+      setNotice(`Error al detener la grabación: ${e}`);
+      console.error('stop_capture', e);
     }
   }
 
   function toggleRecording() {
     if (recording) stopRecording();
     else startRecording();
+  }
+
+  function saveReplay() {
+    setNotice('Instant replay todavía no está disponible (Fase 2b).');
+  }
+
+  async function openFlashback() {
+    try {
+      const w = getCurrentWindow();
+      await w.show();
+      await w.unminimize();
+      await w.setFocus();
+    } catch (e) {
+      console.error('open window', e);
+    }
   }
 
   type Detected = { name: string; steam_appid: number | null };
@@ -184,25 +222,44 @@
     loadMonitors();
     loadAudioInputs();
     const id = setInterval(refresh, 5000);
-
-    let registered = false;
-    (async () => {
-      try {
-        if (!(await isRegistered(RECORD_HOTKEY))) {
-          await register(RECORD_HOTKEY, (e) => {
-            if (e.state === 'Pressed') toggleRecording();
-          });
-        }
-        registered = true;
-      } catch {
-        // fuera de Tauri (preview en navegador)
-      }
-    })();
-
     return () => {
       clearInterval(id);
       if (capPoll) clearInterval(capPoll);
-      if (registered) unregister(RECORD_HOTKEY).catch(() => {});
+    };
+  });
+
+  // Registro de atajos globales: depende de las combinaciones del store y de si se
+  // está reasignando alguna (en ese caso se sueltan todos para que el SO no intercepte
+  // las teclas). `unregisterAll` al entrar evita callbacks colgados de instancias
+  // previas de `tauri dev`; el flag `cancelled` evita que un re-run viejo pise al nuevo.
+  $effect(() => {
+    const { saveReplay: sr, record: rec, open: op } = hotkeys;
+    const paused = capture.active;
+    let cancelled = false;
+    (async () => {
+      try {
+        await unregisterAll();
+        if (cancelled || paused) return;
+        await register(sr, (e) => {
+          if (e.state === 'Pressed') saveReplay();
+        });
+        if (cancelled) return;
+        await register(rec, (e) => {
+          if (e.state === 'Pressed') toggleRecording();
+        });
+        if (cancelled) return;
+        await register(op, (e) => {
+          if (e.state === 'Pressed') openFlashback();
+        });
+      } catch (e) {
+        if (!cancelled) {
+          console.error('register hotkeys', e);
+          setNotice(`No se pudieron registrar los atajos: ${e}`);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
     };
   });
 </script>
@@ -212,7 +269,7 @@
 <div class="app">
   <aside class="sidebar" data-tauri-drag-region>
     <a class="logo" href="/" aria-label="Flashback">
-      <img src="/favicon.png" alt="Flashback" />
+      <img src={iconSrc(ui.icon)} alt="Flashback" />
     </a>
 
     <nav>
@@ -234,7 +291,7 @@
       href="/settings"
       aria-label="Ajustes"
     >
-      <Icon name="settings" size={24} />
+      <Icon name="settings-fill" size={24} />
     </a>
   </aside>
 
@@ -268,7 +325,6 @@
             </span>
             <span class="cap-proc">
               {selectedMonitor ? (activeMonitor?.label ?? 'Pantalla') : game || 'Sin juego'}
-              <Icon name="chevron-down" size={14} sw={2} />
             </span>
           </span>
         </button>
@@ -276,7 +332,7 @@
         {#if pickerOpen}
           <div class="cap-menu" role="menu">
             <button class="cap-opt" class:on={!selectedMonitor} role="menuitem" onclick={backToApp}>
-              <span class="opt-ico"><Icon name="app" size={16} /></span>
+              <span class="opt-ico"><Icon name="gamepad" size={21} /></span>
               <span class="opt-text">
                 <span class="opt-title">Aplicación</span>
                 <span class="opt-sub">{game || 'Sin juego'}</span>
@@ -294,7 +350,7 @@
                 micOn = !micOn;
               }}
             >
-              <span class="opt-ico"><Icon name="mic" size={16} /></span>
+              <span class="opt-ico"><Icon name="mic" size={21} /></span>
               <span class="mic-label">
                 Capturar audio del micrófono
                 <span class="help" aria-label="Qué hace esta opción">
@@ -356,7 +412,11 @@
         <span class="pill mono">{session.quality}</span>
         <span class="pill mono">{session.res}</span>
         <button class="pill mono">{session.fps} FPS <Icon name="chevron-down" size={12} sw={2} /></button>
-        <span class="hotkey mono"><kbd>Alt</kbd><kbd>F9</kbd> grabar</span>
+        <button class="recbtn mono" class:on={recording} onclick={toggleRecording}>
+          {#if recording}<Icon name="stop" size={13} />{:else}<span class="recbtn-dot"></span>{/if}
+          {recording ? 'Detener' : 'Grabar'}
+        </button>
+        <span class="hotkey mono">{labelFor(hotkeys.record)}</span>
         <button class="gear" aria-label="Ajustes de captura"><Icon name="settings" size={17} /></button>
       </div>
 
@@ -366,6 +426,10 @@
     <div class="content">
       {@render children()}
     </div>
+
+    {#if notice}
+      <button class="notice mono" onclick={() => setNotice(null)}>{notice}</button>
+    {/if}
   </div>
 </div>
 
@@ -385,7 +449,7 @@
     align-items: center;
     gap: 6px;
     padding: 0 0 14px;
-    background: var(--bg-1);
+    background: #171717;
   }
   .logo {
     display: grid;
@@ -413,7 +477,7 @@
     align-items: center;
   }
   .nav-item {
-    width: 64px;
+    width: 52px;
     height: 52px;
     display: grid;
     place-items: center;
@@ -427,7 +491,7 @@
     background: var(--bg-2);
   }
   .nav-item.active {
-    color: var(--accent);
+    color: var(--text-0);
     background: var(--bg-2);
   }
   .nav-item.active::before {
@@ -460,7 +524,7 @@
     align-items: center;
     gap: 16px;
     padding: 0 18px;
-    background: var(--bg-1);
+    background: #171717;
     border-bottom: 1px solid var(--line);
   }
 
@@ -530,7 +594,7 @@
     position: absolute;
     inset: 0;
     z-index: 1;
-    background: linear-gradient(90deg, var(--bg-1) 0%, rgba(33, 36, 46, 0.55) 42%, rgba(33, 36, 46, 0) 72%);
+    background: linear-gradient(90deg, #171717 0%, rgba(23, 23, 23, 0.55) 42%, rgba(23, 23, 23, 0) 72%);
   }
   .cap-text {
     position: relative;
@@ -541,7 +605,7 @@
     min-width: 0;
   }
   .cap-label {
-    font-size: 10.5px;
+    font-size: 12px;
     line-height: 1;
     color: var(--text-2);
   }
@@ -549,7 +613,7 @@
     display: flex;
     align-items: center;
     gap: 5px;
-    font-size: 14px;
+    font-size: 16px;
     font-weight: 600;
     line-height: 1.2;
     color: var(--text-0);
@@ -558,23 +622,17 @@
     color: var(--text-2);
     font-weight: 500;
   }
-  .cap-proc :global(svg) {
-    color: var(--text-2);
-    transition: transform 0.18s ease;
-  }
-  .capturing.open .cap-proc :global(svg) {
-    transform: rotate(180deg);
-  }
 
   .cap-menu {
     position: absolute;
     top: calc(100% + 4px);
     left: 0;
-    right: 0;
+    right: auto;
+    width: 420px;
     display: flex;
     flex-direction: column;
     gap: 1px;
-    padding: 6px;
+    padding: 8px;
     background: var(--bg-1);
     border: 1px solid var(--line-strong);
     border-radius: var(--r-md);
@@ -601,12 +659,9 @@
   .opt-ico {
     display: grid;
     place-items: center;
-    width: 22px;
-    color: var(--text-2);
+    width: 24px;
+    color: var(--text-3);
     flex-shrink: 0;
-  }
-  .cap-opt.on .opt-ico {
-    color: var(--accent);
   }
   .screen-grid {
     display: grid;
@@ -618,10 +673,6 @@
     display: flex;
     padding: 3px;
     border-radius: 8px;
-    transition: background 0.12s ease;
-  }
-  .screen-card:hover {
-    background: color-mix(in srgb, var(--accent) 80%, var(--bg-1));
   }
   .screen-thumb {
     position: relative;
@@ -636,7 +687,9 @@
     color: var(--text-3);
     border: 2px solid var(--line);
     overflow: hidden;
+    transition: border-color 0.12s ease;
   }
+  .screen-card:hover .screen-thumb,
   .screen-card.on .screen-thumb {
     border-color: var(--accent);
   }
@@ -830,16 +883,6 @@
     font-size: 11px;
     color: var(--text-2);
   }
-  kbd {
-    font-family: var(--font-mono);
-    font-size: 10.5px;
-    padding: 2px 6px;
-    color: var(--text-1);
-    background: var(--bg-3);
-    border: 1px solid var(--line);
-    border-bottom-width: 2px;
-    border-radius: 5px;
-  }
   .gear {
     width: 34px;
     height: 34px;
@@ -865,5 +908,57 @@
     overflow-y: auto;
     overflow-x: hidden;
     border-left: 1px solid var(--line);
+  }
+
+  .recbtn {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    height: 28px;
+    padding: 0 12px;
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    background: var(--bg-2);
+    color: var(--text-1);
+    font-size: 12px;
+    cursor: pointer;
+    transition: border-color 0.16s ease, background 0.16s ease;
+  }
+  .recbtn:hover {
+    border-color: color-mix(in srgb, var(--accent) 60%, var(--line));
+  }
+  .recbtn-dot {
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: #e5484d;
+  }
+  .recbtn.on {
+    border-color: #e5484d;
+    color: #ff6166;
+  }
+
+  .notice {
+    position: fixed;
+    bottom: 18px;
+    left: 50%;
+    transform: translateX(-50%);
+    max-width: 70%;
+    padding: 9px 14px;
+    border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--line));
+    border-radius: 9px;
+    background: var(--bg-2);
+    color: var(--text-1);
+    font-size: 12px;
+    line-height: 1.35;
+    text-align: left;
+    box-shadow: 0 8px 24px rgb(0 0 0 / 0.35);
+    cursor: pointer;
+    z-index: 50;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .notice:hover {
+    border-color: var(--accent);
   }
 </style>

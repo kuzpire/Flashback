@@ -1,5 +1,25 @@
 <script lang="ts">
   import Icon from '$lib/components/Icon.svelte';
+  import {
+    hotkeys,
+    capture,
+    setHotkey,
+    labelFor,
+    comboFromEvent,
+    hasMainKey,
+    type HotkeyAction
+  } from '$lib/hotkeys.svelte';
+  import { ui, setTheme, setIcon, iconSrc, type Theme, type AppIcon } from '$lib/theme.svelte';
+
+  const themes: { key: Theme; label: string }[] = [
+    { key: 'flashback', label: 'Flashback' },
+    { key: 'cursor', label: 'Cursor' }
+  ];
+
+  const icons: { key: AppIcon; label: string }[] = [
+    { key: 'color', label: 'Color' },
+    { key: 'mono', label: 'Monocromo' }
+  ];
 
   let res = $state('1080p');
   let fps = $state('60');
@@ -11,15 +31,81 @@
 
   const folder = 'C:\\Users\\joshiny\\Videos\\Flashback';
 
-  const hotkeys = [
-    { action: 'Guardar replay', keys: ['Alt', '`'] },
-    { action: 'Grabar / detener', keys: ['Alt', 'F9'] },
-    { action: 'Abrir Flashback', keys: ['Alt', 'F10'] }
+  const shortcutRows: { key: HotkeyAction; label: string }[] = [
+    { key: 'saveReplay', label: 'Guardar replay' },
+    { key: 'record', label: 'Grabar / detener' },
+    { key: 'open', label: 'Abrir Flashback' }
   ];
+
+  let rebinding = $state<HotkeyAction | null>(null);
+  let liveTokens = $state<string[]>([]);
+
+  function onKeyDown(e: KeyboardEvent) {
+    if (!rebinding) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const combo = comboFromEvent(e);
+    if (combo.length) liveTokens = combo;
+  }
+
+  function startCapture(action: HotkeyAction) {
+    rebinding = action;
+    liveTokens = [];
+    // Soltar los atajos globales mientras se escucha, o el SO se traga la combinación.
+    capture.active = true;
+    window.addEventListener('keydown', onKeyDown, true);
+  }
+
+  function endCapture(save: boolean) {
+    window.removeEventListener('keydown', onKeyDown, true);
+    if (save && rebinding && liveTokens.length && hasMainKey(liveTokens)) {
+      setHotkey(rebinding, liveTokens.join('+'));
+    }
+    rebinding = null;
+    liveTokens = [];
+    capture.active = false;
+  }
+
+  // El mismo botón inicia la captura y, pulsado de nuevo, la guarda. Tocar otra fila
+  // cancela la reasignación en curso sin guardar.
+  function toggleRebind(action: HotkeyAction) {
+    if (rebinding === action) endCapture(true);
+    else {
+      if (rebinding) endCapture(false);
+      startCapture(action);
+    }
+  }
+
+  $effect(() => {
+    return () => endCapture(false);
+  });
 </script>
 
 <div class="settings">
   <header><h1>Ajustes</h1></header>
+
+  <section class="panel">
+    <span class="label panel-title">Apariencia</span>
+    <div class="setting">
+      <div class="info"><h3>Tema</h3><p>Esquema de color de la interfaz.</p></div>
+      <div class="seg">
+        {#each themes as t (t.key)}
+          <button class:on={ui.theme === t.key} onclick={() => setTheme(t.key)}>{t.label}</button>
+        {/each}
+      </div>
+    </div>
+    <div class="setting">
+      <div class="info"><h3>Icono de la app</h3><p>El logo de la barra lateral.</p></div>
+      <div class="icon-pick">
+        {#each icons as ic (ic.key)}
+          <button class="icon-opt" class:on={ui.icon === ic.key} onclick={() => setIcon(ic.key)}>
+            <img src={iconSrc(ic.key)} alt={ic.label} />
+            <span>{ic.label}</span>
+          </button>
+        {/each}
+      </div>
+    </div>
+  </section>
 
   <section class="panel">
     <span class="label panel-title">Captura</span>
@@ -103,10 +189,26 @@
 
   <section class="panel">
     <span class="label panel-title">Atajos</span>
-    {#each hotkeys as h (h.action)}
-      <div class="setting hk">
-        <h3>{h.action}</h3>
-        <span class="keys mono">{#each h.keys as k (k)}<kbd>{k}</kbd>{/each}</span>
+    <p class="hk-hint">Pulsa <strong>Cambiar</strong>, haz la combinación (1 o 2 teclas) y pulsa <strong>Guardar</strong>.</p>
+    {#each shortcutRows as row (row.key)}
+      <div class="setting">
+        <div class="info"><h3>{row.label}</h3></div>
+        <div class="hk-edit">
+          <span class="combo mono" class:rec={rebinding === row.key}>
+            {#if rebinding === row.key}
+              {liveTokens.length ? labelFor(liveTokens.join('+')) : 'Pulsa 1–2 teclas…'}
+            {:else}
+              {labelFor(hotkeys[row.key])}
+            {/if}
+          </span>
+          <button
+            class="rebind"
+            class:on={rebinding === row.key}
+            onclick={() => toggleRebind(row.key)}
+          >
+            {rebinding === row.key ? 'Guardar' : 'Cambiar'}
+          </button>
+        </div>
       </div>
     {/each}
   </section>
@@ -199,6 +301,40 @@
     font-weight: 600;
   }
 
+  .icon-pick {
+    display: flex;
+    flex-shrink: 0;
+    gap: 8px;
+  }
+  .icon-opt {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 7px;
+    width: 88px;
+    padding: 12px 10px 9px;
+    background: var(--bg-0);
+    border: 1px solid var(--line);
+    border-radius: var(--r-sm);
+    color: var(--text-2);
+    transition: border-color 0.14s ease, color 0.14s ease;
+  }
+  .icon-opt img {
+    width: 30px;
+    height: 30px;
+  }
+  .icon-opt span {
+    font-size: 11.5px;
+  }
+  .icon-opt:hover {
+    color: var(--text-0);
+    border-color: var(--line-strong);
+  }
+  .icon-opt.on {
+    border-color: var(--accent);
+    color: var(--text-0);
+  }
+
   .switch {
     flex-shrink: 0;
     width: 44px;
@@ -244,25 +380,59 @@
     color: var(--text-0);
   }
 
-  .hk {
-    padding: 13px 0;
+  .hk-hint {
+    font-size: 12px;
+    color: var(--text-2);
+    padding: 2px 0 10px;
   }
-  .hk h3 {
-    font-size: 13.5px;
-    font-weight: 500;
-  }
-  .keys {
-    display: flex;
-    gap: 5px;
-  }
-  kbd {
-    font-family: var(--font-mono);
-    font-size: 11px;
-    padding: 3px 8px;
+  .hk-hint strong {
     color: var(--text-1);
-    background: var(--bg-3);
+    font-weight: 600;
+  }
+
+  .hk-edit {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-shrink: 0;
+  }
+  .combo {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 124px;
+    height: 34px;
+    padding: 0 14px;
+    font-size: 12px;
+    letter-spacing: 0.04em;
+    color: var(--text-1);
+    background: var(--bg-0);
     border: 1px solid var(--line);
-    border-bottom-width: 2px;
-    border-radius: 5px;
+    border-radius: var(--r-sm);
+  }
+  .combo.rec {
+    color: var(--accent);
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 12%, var(--bg-0));
+  }
+  .rebind {
+    height: 34px;
+    padding: 0 16px;
+    font-size: 12.5px;
+    color: var(--text-1);
+    background: var(--bg-2);
+    border: 1px solid var(--line-strong);
+    border-radius: var(--r-sm);
+    transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+  }
+  .rebind:hover {
+    background: var(--bg-3);
+    color: var(--text-0);
+  }
+  .rebind.on {
+    color: var(--on-accent);
+    background: var(--accent);
+    border-color: transparent;
+    font-weight: 600;
   }
 </style>

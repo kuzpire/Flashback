@@ -27,12 +27,19 @@ fn list_audio_inputs() -> Vec<capture::AudioInput> {
 }
 
 #[tauri::command]
-fn start_capture(monitor_id: String) -> Result<(), String> {
-    capture::start(monitor_id)
+fn start_capture(app: tauri::AppHandle, monitor_id: String) -> Result<(), String> {
+    use tauri::Manager;
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("clips");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    capture::start(monitor_id, dir.to_string_lossy().into_owned())
 }
 
 #[tauri::command]
-fn stop_capture() {
+fn stop_capture() -> Option<String> {
     capture::stop()
 }
 

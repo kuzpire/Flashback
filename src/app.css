@@ -31,8 +31,30 @@
   --r-md: 9px;
   --r-lg: 13px;
 
-  --sidebar-w: 88px;
-  --topbar-h: 58px;
+  --sidebar-w: 70px;
+  --topbar-h: 60px;
+}
+
+:root[data-theme='cursor'] {
+  --bg-0: #151515;
+  --bg-1: #1c1c1d;
+  --bg-2: #232324;
+  --bg-3: #2a2a2b;
+  --bg-hover: #333335;
+
+  --line: rgba(255, 255, 255, 0.07);
+  --line-strong: #3a3a3a;
+
+  --text-0: #d4d4d4;
+  --text-1: #aeaeae;
+  --text-2: #858585;
+  --text-3: #6b6b6b;
+
+  --accent: #007acc;
+  --accent-soft: #2b90d9;
+  --accent-deep: #005a9e;
+  --accent-glow: rgba(0, 122, 204, 0.3);
+  --on-accent: #ffffff;
 }
 
 *,
@@ -71,6 +93,10 @@ body::before {
   background:
     radial-gradient(900px 520px at 82% -8%, rgba(63, 109, 245, 0.08), transparent 60%),
     radial-gradient(700px 600px at -6% 108%, rgba(42, 76, 192, 0.10), transparent 55%);
+}
+
+:root[data-theme='cursor'] body::before {
+  background: none;
 }
 
 ::selection {
