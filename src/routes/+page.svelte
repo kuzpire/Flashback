@@ -1,13 +1,18 @@
 <script lang="ts">
   import Icon from '$lib/components/Icon.svelte';
   import ClipCard from '$lib/components/ClipCard.svelte';
-  import { clips, groupClips } from '$lib/clips';
+  import { groupClips } from '$lib/clips';
+  import { library, refreshLibrary } from '$lib/library.svelte';
 
   let query = $state('');
   let view = $state<'grid' | 'list'>('grid');
 
+  $effect(() => {
+    refreshLibrary();
+  });
+
   const filtered = $derived(
-    clips.filter((c) => {
+    library.clips.filter((c) => {
       const q = query.trim().toLowerCase();
       return !q || c.title.toLowerCase().includes(q) || c.source.toLowerCase().includes(q);
     })
@@ -19,7 +24,6 @@
   <header class="head">
     <div class="left">
       <h1>Todos los clips</h1>
-      <span class="count mono">{filtered.length}</span>
       <button class="montage">
         <Icon name="plus" size={15} sw={2} />
         Crear montaje
@@ -50,7 +54,13 @@
     </div>
   </header>
 
-  {#if filtered.length === 0}
+  {#if library.clips.length === 0}
+    <div class="empty">
+      <Icon name="clips" size={50} sw={1.3} />
+      <p>Aún no tienes clips.</p>
+      <span class="hint mono">Graba con el botón o tu atajo y aparecerán aquí.</span>
+    </div>
+  {:else if filtered.length === 0}
     <div class="empty">
       <Icon name="chevrons" size={56} sw={1.2} />
       <p>Sin resultados para “{query}”.</p>
@@ -61,7 +71,7 @@
         <div class="group-head">
           <span class="label">{group.label}</span>
           <span class="dash"></span>
-          <span class="label src">{group.source}</span>
+          {#if group.source}<span class="label src">{group.source}</span>{/if}
         </div>
         <div class="grid" class:list={view === 'list'}>
           {#each group.clips as clip (clip.id)}
@@ -96,14 +106,6 @@
     font-weight: 650;
     letter-spacing: -0.01em;
   }
-  .count {
-    font-size: 12px;
-    padding: 3px 9px;
-    color: var(--accent);
-    background: rgba(63, 109, 245, 0.08);
-    border: 1px solid rgba(63, 109, 245, 0.18);
-    border-radius: 999px;
-  }
   .montage {
     display: inline-flex;
     align-items: center;
@@ -112,15 +114,15 @@
     padding: 8px 14px;
     font-size: 13px;
     font-weight: 560;
-    color: var(--accent);
-    background: rgba(63, 109, 245, 0.07);
-    border: 1px solid rgba(63, 109, 245, 0.22);
+    color: var(--bright);
+    background: rgba(240, 242, 247, 0.1);
+    border: 1px solid rgba(240, 242, 247, 0.3);
     border-radius: var(--r-sm);
     transition: background 0.15s ease, box-shadow 0.15s ease;
   }
   .montage:hover {
-    background: rgba(63, 109, 245, 0.13);
-    box-shadow: 0 0 0 3px rgba(63, 109, 245, 0.08);
+    background: rgba(240, 242, 247, 0.16);
+    box-shadow: 0 0 0 3px rgba(240, 242, 247, 0.08);
   }
 
   .right {
@@ -191,10 +193,10 @@
     transition: color 0.14s ease, background 0.14s ease;
   }
   .viewtoggle button:hover {
-    color: var(--text-1);
+    color: var(--bright);
   }
   .viewtoggle button.on {
-    color: var(--accent);
+    color: var(--bright);
     background: var(--bg-3);
   }
 
@@ -241,5 +243,9 @@
   .empty p {
     font-size: 14px;
     color: var(--text-2);
+  }
+  .empty .hint {
+    font-size: 11.5px;
+    color: var(--text-3);
   }
 </style>

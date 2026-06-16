@@ -1,0 +1,68 @@
+import { invoke, convertFileSrc } from '@tauri-apps/api/core';
+import type { Clip } from './clips';
+
+type RawClip = {
+  id: string;
+  name: string;
+  path: string;
+  size_bytes: number;
+  modified_ms: number;
+  duration_sec: number;
+};
+
+const FAV_KEY = 'flashback.favorites';
+
+function loadFavs(): string[] {
+  if (typeof localStorage === 'undefined') return [];
+  try {
+    const raw = localStorage.getItem(FAV_KEY);
+    if (raw) return JSON.parse(raw);
+  } catch {
+    // localStorage corrupto o bloqueado
+  }
+  return [];
+}
+
+export const library = $state<{ clips: Clip[]; loaded: boolean }>({ clips: [], loaded: false });
+
+// Los favoritos no viven en el archivo: se guardan por id de clip (= nombre del MP4,
+// estable) en localStorage. Cuando exista metadato real por clip se moverán al backend.
+export const favorites = $state<{ ids: string[] }>({ ids: loadFavs() });
+
+export function isFavorite(id: string): boolean {
+  return favorites.ids.includes(id);
+}
+
+export function toggleFavorite(id: string) {
+  favorites.ids = isFavorite(id) ? favorites.ids.filter((x) => x !== id) : [...favorites.ids, id];
+  if (typeof localStorage !== 'undefined') {
+    try {
+      localStorage.setItem(FAV_KEY, JSON.stringify(favorites.ids));
+    } catch {
+      // sin persistencia disponible
+    }
+  }
+}
+
+function toClip(r: RawClip): Clip {
+  return {
+    id: r.id,
+    title: 'Vídeo de Flashback',
+    source: '',
+    durationSec: r.duration_sec,
+    sizeBytes: r.size_bytes,
+    createdAt: new Date(r.modified_ms),
+    previewSrc: convertFileSrc(r.path)
+  };
+}
+
+export async function refreshLibrary() {
+  try {
+    const raw = await invoke<RawClip[]>('list_clips');
+    library.clips = raw.map(toClip);
+  } catch {
+    // fuera de Tauri (preview en navegador): biblioteca vacía
+    library.clips = [];
+  }
+  library.loaded = true;
+}

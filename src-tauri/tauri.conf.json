@@ -13,16 +13,20 @@
     "windows": [
       {
         "title": "Flashback",
-        "width": 1100,
+        "width": 1280,
         "height": 720,
-        "minWidth": 880,
-        "minHeight": 560,
+        "minWidth": 1280,
+        "minHeight": 720,
         "decorations": false,
         "shadow": true
       }
     ],
     "security": {
-      "csp": null
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": ["$APPDATA/clips/*"]
+      }
     }
   },
   "bundle": {

@@ -160,6 +160,12 @@ pub async fn detect_game(app: &tauri::AppHandle) -> Option<DetectedGame> {
     detect_with(&map)
 }
 
+// PID del juego actualmente rastreado (el de primer plano, persistido mientras viva).
+// Lo usa la captura para encontrar la ventana del juego en modo Aplicación.
+pub fn current_game_pid() -> Option<u32> {
+    CURRENT.lock().unwrap().as_ref().map(|(pid, _)| *pid)
+}
+
 #[cfg(target_os = "windows")]
 fn detect_with(map: &GameMap) -> Option<DetectedGame> {
     let procs = running_processes();

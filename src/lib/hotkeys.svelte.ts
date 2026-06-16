@@ -3,7 +3,7 @@ export type HotkeyAction = 'saveReplay' | 'record' | 'open';
 const STORAGE_KEY = 'flashback.hotkeys';
 
 const defaults: Record<HotkeyAction, string> = {
-  saveReplay: 'Alt+`',
+  saveReplay: 'Alt+F8',
   record: 'Alt+F9',
   open: 'Alt+F10'
 };
@@ -52,12 +52,13 @@ export function hasMainKey(tokens: string[]): boolean {
   return tokens.some((t) => !isModifier(t));
 }
 
-// Tokens canónicos (los que entiende el plugin al unir con '+') → etiqueta para la UI.
+// Tokens canónicos (los que entiende el plugin al unir con '+') → etiquetas para la UI.
+export function labelTokens(accel: string): string[] {
+  return accel.split('+').map((t) => modLabel[t] ?? t.toUpperCase());
+}
+
 export function labelFor(accel: string): string {
-  return accel
-    .split('+')
-    .map((t) => modLabel[t] ?? t.toUpperCase())
-    .join(' + ');
+  return labelTokens(accel).join(' + ');
 }
 
 const CODE_KEYS: Record<string, string> = {

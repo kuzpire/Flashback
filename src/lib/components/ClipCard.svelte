@@ -1,23 +1,28 @@
 <script lang="ts">
-  import { untrack } from 'svelte';
   import Icon from './Icon.svelte';
   import { menu } from '$lib/menu.svelte';
-  import { formatDuration, formatRelative, thumbBackground, type Clip } from '$lib/clips';
+  import { formatDuration, formatRelative, type Clip } from '$lib/clips';
+  import { isFavorite, toggleFavorite } from '$lib/library.svelte';
 
   let { clip }: { clip: Clip } = $props();
-  let favorite = $state(untrack(() => clip.favorite ?? false));
 
   const open = $derived(menu.openId === clip.id);
+  const favorite = $derived(isFavorite(clip.id));
 
   let video = $state<HTMLVideoElement | null>(null);
 
+  // Carátula = primer fotograma del vídeo. Con preload=metadata el frame no siempre
+  // se pinta solo; un seek mínimo lo fuerza a renderizar.
+  function showFirstFrame() {
+    if (video) video.currentTime = 0.05;
+  }
   function playPreview() {
     video?.play().catch(() => {});
   }
   function stopPreview() {
     if (!video) return;
     video.pause();
-    video.currentTime = 0;
+    video.currentTime = 0.05;
   }
 
   function toggleMenu(e: MouseEvent) {
@@ -29,17 +34,17 @@
 <svelte:window onclick={() => (menu.openId = null)} />
 
 <article class="card" class:open onmouseenter={playPreview} onmouseleave={stopPreview}>
-  <div class="thumb" style:background={thumbBackground(clip.id)}>
+  <div class="thumb">
     {#if clip.previewSrc}
       <video
         bind:this={video}
         class="preview"
         src={clip.previewSrc}
-        poster={clip.poster}
         muted
         loop
         playsinline
         preload="metadata"
+        onloadedmetadata={showFirstFrame}
       ></video>
     {:else}
       <div class="watermark"><Icon name="chevrons" size={150} sw={1.1} /></div>
@@ -52,13 +57,13 @@
       {formatDuration(clip.durationSec)}
     </div>
 
-    <button class="fav" class:on={favorite} aria-label="Favorito" onclick={() => (favorite = !favorite)}>
+    <button class="fav" class:on={favorite} aria-label="Favorito" onclick={() => toggleFavorite(clip.id)}>
       <Icon name={favorite ? 'star-fill' : 'star'} size={16} sw={1.8} />
     </button>
   </div>
 
   <div class="meta">
-    <span class="src label">{clip.source}</span>
+    {#if clip.source}<span class="src label">{clip.source}</span>{/if}
 
     <div class="row">
       <h3 class="title">{clip.title}</h3>
@@ -109,6 +114,7 @@
     aspect-ratio: 16 / 9;
     overflow: hidden;
     border-radius: 4px 4px 0 0;
+    background: var(--bg-0);
   }
   .watermark {
     position: absolute;
@@ -183,6 +189,7 @@
     display: block;
     margin-bottom: 3px;
     line-height: 1;
+    font-size: 12px;
     color: var(--text-2);
   }
 
@@ -193,7 +200,7 @@
     gap: 10px;
   }
   .title {
-    font-size: 14.5px;
+    font-size: 16px;
     font-weight: 560;
     line-height: 1.2;
     color: var(--text-0);

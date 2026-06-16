@@ -2,6 +2,7 @@
   import '@fontsource-variable/geist';
   import '../app.css';
   import { page } from '$app/state';
+  import { goto } from '$app/navigation';
   import Icon from '$lib/components/Icon.svelte';
   import WindowControls from '$lib/components/WindowControls.svelte';
   import { invoke } from '@tauri-apps/api/core';
@@ -9,6 +10,8 @@
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { hotkeys, capture, labelFor } from '$lib/hotkeys.svelte';
   import { ui, iconSrc } from '$lib/theme.svelte';
+  import { refreshLibrary } from '$lib/library.svelte';
+  import { replay } from '$lib/replay.svelte';
 
   let { children } = $props();
 
@@ -20,8 +23,6 @@
   const isActive = (href: string) =>
     href === '/' ? page.url.pathname === '/' : page.url.pathname.startsWith(href);
 
-  const session = { buffer: '01:00', quality: 'Alto', res: '1080p', fps: '60' };
-
   type Monitor = {
     id: string;
     label: string;
@@ -30,8 +31,8 @@
     primary: boolean;
     thumb: string | null;
   };
-  type CapStatus = { running: boolean; frames: number; width: number; height: number; seconds: number };
   type AudioInput = { id: string; name: string };
+  type Seg = { key: string; value: string; options: { val: string; label?: string }[] };
 
   let monitors = $state<Monitor[]>([]);
   let selectedMonitor = $state<string | null>(null);
@@ -40,12 +41,27 @@
   let micOn = $state(false);
   let audioInputs = $state<AudioInput[]>([]);
   let micInput = $state('');
+  let micDDOpen = $state(false);
+  let openSeg = $state<string | null>(null);
 
-  let cap = $state<CapStatus | null>(null);
-  let fps = $state(0);
-  let capPoll: ReturnType<typeof setInterval> | null = null;
-  let lastFrames = 0;
-  let lastTime = 0;
+  // Ajustes rápidos de la barra. De momento son solo UI: el camino de captura aún no
+  // los consume (resolución/fps/calidad se fijan al implementarse la Fase 2b).
+  let segs = $state<Seg[]>([
+    { key: 'tiempo', value: '1m', options: ['15s', '30s', '1m', '2m', '3m', '4m', '5m'].map((v) => ({ val: v })) },
+    { key: 'calidad', value: 'Alta', options: ['Baja', 'Normal', 'Alta', 'Muy alta', 'Máxima'].map((v) => ({ val: v })) },
+    {
+      key: 'resolucion',
+      value: '1080p',
+      options: [
+        { val: '480p' },
+        { val: '720p', label: '720p HD' },
+        { val: '1080p', label: '1080p Full HD' },
+        { val: '1440p', label: '1440p 2K' },
+        { val: '2160p', label: '2160p 4K' }
+      ]
+    },
+    { key: 'fps', value: '60 FPS', options: ['24 FPS', '30 FPS', '60 FPS', '120 FPS', '144 FPS', '240 FPS'].map((v) => ({ val: v })) }
+  ]);
 
   let notice = $state<string | null>(null);
   let noticeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -56,6 +72,7 @@
   }
 
   const activeMonitor = $derived(monitors.find((m) => m.id === selectedMonitor) ?? null);
+  const micName = $derived(audioInputs.find((d) => d.id === micInput)?.name ?? 'Sin micrófonos');
 
   async function loadMonitors() {
     try {
@@ -85,33 +102,30 @@
     }
   }
 
-  function stopPolling() {
-    if (capPoll) {
-      clearInterval(capPoll);
-      capPoll = null;
-    }
-    cap = null;
-    fps = 0;
-    lastFrames = 0;
-    lastTime = 0;
+  function closeAll() {
+    pickerOpen = false;
+    micDDOpen = false;
+    openSeg = null;
   }
 
-  // FPS instantáneo: frames entregados entre dos sondeos (WGC no manda frames
-  // duplicados, así que en pantalla quieta baja de los 60 y es lo correcto).
-  async function pollStatus() {
-    try {
-      const s = await invoke<CapStatus>('capture_status');
-      const now = performance.now();
-      if (lastTime) {
-        const dt = (now - lastTime) / 1000;
-        if (dt > 0) fps = (s.frames - lastFrames) / dt;
-      }
-      lastFrames = s.frames;
-      lastTime = now;
-      cap = s;
-    } catch {
-      // fuera de Tauri (preview en navegador)
-    }
+  function toggleMicDD(e: MouseEvent) {
+    e.stopPropagation();
+    micDDOpen = !micDDOpen;
+  }
+  function pickMic(e: MouseEvent, id: string) {
+    e.stopPropagation();
+    micInput = id;
+    micDDOpen = false;
+  }
+
+  function toggleSeg(e: MouseEvent, key: string) {
+    e.stopPropagation();
+    openSeg = openSeg === key ? null : key;
+  }
+  function pickSeg(e: MouseEvent, seg: Seg, val: string) {
+    e.stopPropagation();
+    seg.value = val;
+    openSeg = null;
   }
 
   // Elegir pantalla solo fija el objetivo; grabar es aparte (atajo / botón).
@@ -130,23 +144,16 @@
 
   async function startRecording() {
     if (recording) return;
-    if (monitors.length === 0) await loadMonitors();
-    // En modo Aplicación aún no capturamos la ventana del juego (CreateForWindow
-    // pendiente): de momento caemos a la pantalla principal para que el atajo grabe.
-    const target =
-      selectedMonitor ?? monitors.find((m) => m.primary)?.id ?? monitors[0]?.id ?? null;
+    const target = captureTarget;
     if (!target) {
-      setNotice('No se encontró ninguna pantalla para capturar.');
+      setNotice('Selecciona una pantalla para grabar, o abre un juego para el modo Aplicación.');
       return;
     }
     setNotice('Iniciando grabación…');
     try {
-      await invoke('start_capture', { monitorId: target });
+      await invoke('start_capture', { target });
       setNotice(null);
       recording = true;
-      lastFrames = 0;
-      lastTime = performance.now();
-      capPoll = setInterval(pollStatus, 1000);
     } catch (e) {
       setNotice(`No se pudo iniciar la grabación: ${e}`);
       console.error('start_capture', e);
@@ -155,11 +162,11 @@
 
   async function stopRecording() {
     if (!recording) return;
-    stopPolling();
     recording = false;
     try {
       const path = await invoke<string | null>('stop_capture');
       setNotice(path ? `Clip guardado: ${path}` : 'Grabación detenida (no se guardó archivo).');
+      if (path) await refreshLibrary();
     } catch (e) {
       setNotice(`Error al detener la grabación: ${e}`);
       console.error('stop_capture', e);
@@ -171,8 +178,32 @@
     else startRecording();
   }
 
-  function saveReplay() {
-    setNotice('Instant replay todavía no está disponible (Fase 2b).');
+  function editHotkey() {
+    goto('/settings#atajos');
+  }
+
+  async function saveReplay() {
+    if (!replay.enabled) {
+      setNotice('Activa “Replay en segundo plano” en Ajustes para guardar.');
+      return;
+    }
+    if (!captureTarget) {
+      setNotice('Sin objetivo: selecciona una pantalla o abre un juego para que el replay grabe.');
+      return;
+    }
+    setNotice('Guardando replay…');
+    try {
+      const path = await invoke<string | null>('save_replay');
+      if (path) {
+        setNotice(`Replay guardado: ${path}`);
+        await refreshLibrary();
+      } else {
+        setNotice('No se pudo guardar el replay (el buffer aún no tiene un keyframe).');
+      }
+    } catch (e) {
+      setNotice(`Error al guardar el replay: ${e}`);
+      console.error('save_replay', e);
+    }
   }
 
   async function openFlashback() {
@@ -191,6 +222,11 @@
   let game = $state('');
   let frame = $state('');
   let frameKey = '';
+
+  // Objetivo de captura: una pantalla concreta, o la ventana del juego detectado en
+  // modo Aplicación. Si es modo Aplicación y NO hay juego, no hay objetivo (null): el
+  // usuario debe elegir una pantalla; no se cae al fallback de grabar la principal.
+  const captureTarget = $derived(selectedMonitor ? selectedMonitor : game ? 'window' : null);
 
   async function refresh() {
     try {
@@ -224,7 +260,6 @@
     const id = setInterval(refresh, 5000);
     return () => {
       clearInterval(id);
-      if (capPoll) clearInterval(capPoll);
     };
   });
 
@@ -262,15 +297,39 @@
       cancelled = true;
     };
   });
+
+  // Instant replay: se codifica en segundo plano mientras el toggle esté activo. El
+  // efecto reacciona al toggle, a la duración y a la pantalla objetivo; `lastReplayKey`
+  // evita reinicios redundantes cuando se recargan los monitores sin cambiar el destino.
+  let lastReplayKey = '';
+  $effect(() => {
+    const enabled = replay.enabled;
+    const seconds = replay.seconds;
+    const target = captureTarget;
+    const key = enabled && target ? `${target}|${seconds}` : 'off';
+    if (key === lastReplayKey) return;
+    lastReplayKey = key;
+    (async () => {
+      try {
+        await invoke('stop_replay');
+        if (key !== 'off') {
+          await invoke('start_replay', { target, seconds });
+        }
+      } catch (e) {
+        setNotice(`No se pudo iniciar el replay: ${e}`);
+        console.error('replay', e);
+      }
+    })();
+  });
 </script>
 
-<svelte:window onclick={() => (pickerOpen = false)} />
+<svelte:window onclick={closeAll} />
 
 <div class="app">
   <aside class="sidebar" data-tauri-drag-region>
-    <a class="logo" href="/" aria-label="Flashback">
+    <div class="logo" data-tauri-drag-region>
       <img src={iconSrc(ui.icon)} alt="Flashback" />
-    </a>
+    </div>
 
     <nav>
       {#each nav as item (item.href)}
@@ -285,6 +344,14 @@
       {/each}
     </nav>
 
+    <a
+      class="nav-item games-tab"
+      class:active={isActive('/juegos')}
+      href="/juegos"
+      aria-label="Juegos"
+    >
+      <Icon name="gamepad" size={24} />
+    </a>
     <a
       class="nav-item settings-tab"
       class:active={isActive('/settings')}
@@ -365,19 +432,37 @@
             </button>
 
             <div class="mic-input">
-              <select
-                class="mic-select"
-                bind:value={micInput}
-                onclick={(e) => e.stopPropagation()}
-                aria-label="Entrada de micrófono"
-              >
-                {#each audioInputs as inp (inp.id)}
-                  <option value={inp.id}>{inp.name}</option>
-                {/each}
-                {#if audioInputs.length === 0}
-                  <option value="" disabled selected>Sin micrófonos detectados</option>
+              <div class="mic-dd" class:open={micDDOpen}>
+                <button
+                  class="mic-trigger"
+                  aria-haspopup="listbox"
+                  aria-expanded={micDDOpen}
+                  aria-label="Entrada de micrófono"
+                  onclick={toggleMicDD}
+                >
+                  <span class="mic-value">{micName}</span>
+                  <span class="mic-chev"><Icon name="chevron-down" size={13} sw={2} /></span>
+                </button>
+                {#if micDDOpen}
+                  <div class="mic-list" role="listbox">
+                    {#each audioInputs as inp (inp.id)}
+                      <button
+                        class="mic-item"
+                        class:on={micInput === inp.id}
+                        role="option"
+                        aria-selected={micInput === inp.id}
+                        onclick={(e) => pickMic(e, inp.id)}
+                      >
+                        {inp.name}
+                        <span class="mic-check"><Icon name="check" size={13} sw={2.2} /></span>
+                      </button>
+                    {/each}
+                    {#if audioInputs.length === 0}
+                      <button class="mic-item" disabled>Sin micrófonos detectados</button>
+                    {/if}
+                  </div>
                 {/if}
-              </select>
+              </div>
             </div>
 
             <div class="cap-sep"></div>
@@ -404,20 +489,48 @@
         {/if}
       </div>
 
+      <span class="pill combo mono">
+        {#each segs as seg (seg.key)}
+          {#if seg.key !== 'tiempo'}<span class="sep">|</span>{/if}
+          <span class="segwrap" class:open={openSeg === seg.key}>
+            <button
+              class="seg"
+              aria-haspopup="true"
+              aria-expanded={openSeg === seg.key}
+              onclick={(e) => toggleSeg(e, seg.key)}
+            >
+              <span class="seg-val">{seg.value}</span>
+              <span class="chev"><Icon name="chevron-down" size={11} sw={2} /></span>
+            </button>
+            {#if openSeg === seg.key}
+              <div class="seg-menu" role="menu">
+                {#each seg.options as opt (opt.val)}
+                  <button
+                    class="seg-opt"
+                    class:on={seg.value === opt.val}
+                    onclick={(e) => pickSeg(e, seg, opt.val)}
+                  >
+                    {opt.label ?? opt.val}
+                    <span class="seg-check"><Icon name="check" size={13} sw={2.2} /></span>
+                  </button>
+                {/each}
+              </div>
+            {/if}
+          </span>
+        {/each}
+      </span>
+
       <div class="quick">
-        {#if recording && cap?.running}
-          <span class="pill mono live">{fps.toFixed(0)} fps · {cap.width}×{cap.height}</span>
-        {/if}
-        <span class="pill mono">{session.buffer}</span>
-        <span class="pill mono">{session.quality}</span>
-        <span class="pill mono">{session.res}</span>
-        <button class="pill mono">{session.fps} FPS <Icon name="chevron-down" size={12} sw={2} /></button>
-        <button class="recbtn mono" class:on={recording} onclick={toggleRecording}>
-          {#if recording}<Icon name="stop" size={13} />{:else}<span class="recbtn-dot"></span>{/if}
-          {recording ? 'Detener' : 'Grabar'}
-        </button>
-        <span class="hotkey mono">{labelFor(hotkeys.record)}</span>
-        <button class="gear" aria-label="Ajustes de captura"><Icon name="settings" size={17} /></button>
+        <span class="pill combo recpill mono" class:on={recording}>
+          <button class="seg rec-seg" onclick={toggleRecording}>
+            <span class="rec-ico"><Icon name={recording ? 'stop' : 'play'} size={18} /></span>
+            <span class="rec-label">{recording ? 'Detener grabación' : 'Iniciar grabación'}</span>
+          </button>
+          <span class="sep">|</span>
+          <button class="seg rec-hotkey" title="Editar atajo de grabación" onclick={editHotkey}>
+            {labelFor(hotkeys.record)}
+          </button>
+        </span>
       </div>
 
       <div class="winctl"><WindowControls /></div>
@@ -458,15 +571,12 @@
     height: var(--topbar-h);
     margin-bottom: 8px;
     border-bottom: 1px solid var(--line);
-    transition: background 0.16s ease;
-  }
-  .logo:hover {
-    background: var(--bg-2);
   }
   .logo img {
     display: block;
     width: 30px;
     height: 30px;
+    pointer-events: none;
   }
 
   nav {
@@ -503,11 +613,14 @@
     width: 3px;
     height: 22px;
     border-radius: 0 3px 3px 0;
-    background: var(--accent);
-    box-shadow: 0 0 12px var(--accent-glow);
+    background: rgba(255, 255, 255, 0.7);
+    box-shadow: 0 0 12px rgba(255, 255, 255, 0.25);
+  }
+  .games-tab {
+    margin-top: auto;
   }
   .settings-tab {
-    margin-top: auto;
+    margin-top: 6px;
   }
 
   .main {
@@ -538,7 +651,7 @@
     align-self: stretch;
     display: flex;
     align-items: center;
-    min-width: 330px;
+    min-width: 240px;
     padding: 0 16px;
     overflow: hidden;
     text-align: left;
@@ -663,6 +776,9 @@
     color: var(--text-3);
     flex-shrink: 0;
   }
+  .cap-opt.on .opt-ico {
+    color: var(--bright);
+  }
   .screen-grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
@@ -691,7 +807,7 @@
   }
   .screen-card:hover .screen-thumb,
   .screen-card.on .screen-thumb {
-    border-color: var(--accent);
+    border-color: var(--bright);
   }
   .screen-check {
     position: absolute;
@@ -702,8 +818,8 @@
     width: 23px;
     height: 23px;
     border-radius: 999px;
-    color: var(--on-accent);
-    background: var(--accent);
+    color: var(--bg-1);
+    background: var(--bright);
     box-shadow: 0 2px 7px rgba(0, 0, 0, 0.35);
   }
   .opt-text {
@@ -728,7 +844,7 @@
   .opt-check {
     display: grid;
     place-items: center;
-    color: var(--accent);
+    color: var(--bright);
     flex-shrink: 0;
   }
   .cap-sep {
@@ -802,23 +918,86 @@
     margin-top: 2px;
     padding: 0 8px 2px;
   }
-  .mic-select {
+  .mic-dd {
+    position: relative;
+  }
+  .mic-trigger {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
     width: 100%;
-    padding: 7px 9px;
-    font-size: 12px;
-    color: var(--text-1);
-    background: var(--bg-2);
+    height: 30px;
+    padding: 6px;
+    font-size: 11px;
+    color: var(--text-0);
+    background: var(--bg-0);
     border: 1px solid var(--line);
-    border-radius: 6px;
+    border-radius: 4px;
     cursor: pointer;
+    text-align: left;
     transition: border-color 0.14s ease;
   }
-  .mic-select:hover {
+  .mic-trigger:hover,
+  .mic-dd.open .mic-trigger {
     border-color: var(--line-strong);
   }
-  .mic-select:focus {
-    outline: none;
-    border-color: var(--accent);
+  .mic-value {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .mic-chev {
+    display: inline-flex;
+    color: var(--text-3);
+    flex-shrink: 0;
+    transition: transform 0.15s ease;
+  }
+  .mic-dd.open .mic-chev {
+    transform: rotate(180deg);
+  }
+  .mic-list {
+    position: absolute;
+    top: calc(100% + 4px);
+    left: 0;
+    right: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    padding: 5px;
+    background: var(--bg-1);
+    border: 1px solid var(--line-strong);
+    border-radius: 8px;
+    box-shadow: 0 18px 42px -14px rgba(0, 0, 0, 0.7);
+    z-index: 70;
+  }
+  .mic-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 8px 9px;
+    font-size: 11px;
+    border-radius: 6px;
+    color: var(--text-1);
+    text-align: left;
+    white-space: nowrap;
+    transition: background 0.12s ease, color 0.12s ease;
+  }
+  .mic-item:hover {
+    background: var(--bg-3);
+    color: var(--text-0);
+  }
+  .mic-item.on {
+    color: var(--bright);
+  }
+  .mic-item .mic-check {
+    opacity: 0;
+    flex-shrink: 0;
+    color: var(--bright);
+  }
+  .mic-item.on .mic-check {
+    opacity: 1;
   }
 
   .mic-switch {
@@ -840,12 +1019,12 @@
     transition: transform 0.18s ease, background 0.18s ease;
   }
   .mic-opt.on .mic-switch {
-    background: var(--accent-deep);
+    background: var(--bright);
     border-color: transparent;
   }
   .mic-opt.on .mic-knob {
     transform: translateX(16px);
-    background: var(--accent);
+    background: var(--bg-1);
   }
 
   .quick {
@@ -853,8 +1032,10 @@
     display: flex;
     align-items: center;
     gap: 7px;
+    flex-shrink: 0;
   }
   .pill {
+    flex-shrink: 0;
     display: inline-flex;
     align-items: center;
     gap: 5px;
@@ -866,35 +1047,111 @@
     border-radius: var(--r-sm);
     white-space: nowrap;
   }
-  button.pill:hover {
-    color: var(--text-0);
-    border-color: var(--line-strong);
+  .pill.combo {
+    gap: 0;
+    padding: 0;
+    font-size: 13.5px;
   }
-  .pill.live {
-    color: var(--rec);
-    border-color: color-mix(in srgb, var(--rec) 40%, transparent);
-    background: color-mix(in srgb, var(--rec) 12%, var(--bg-2));
-  }
-  .hotkey {
+  .pill.combo .seg {
     display: inline-flex;
     align-items: center;
-    gap: 5px;
-    margin-left: 4px;
-    font-size: 11px;
-    color: var(--text-2);
-  }
-  .gear {
-    width: 34px;
-    height: 34px;
-    display: grid;
-    place-items: center;
-    border-radius: var(--r-sm);
+    gap: 6px;
+    padding: 9px 14px;
+    background: none;
+    border: 0;
     color: var(--text-1);
-    transition: background 0.14s ease, color 0.14s ease;
+    font: inherit;
+    white-space: nowrap;
   }
-  .gear:hover {
-    background: var(--bg-2);
+  .pill.combo button.seg {
+    cursor: pointer;
+    transition: color 0.15s ease;
+  }
+  .pill.combo button.seg:hover,
+  .segwrap.open button.seg {
     color: var(--text-0);
+  }
+  .pill.combo .sep {
+    color: var(--line-strong);
+    padding: 0;
+    user-select: none;
+  }
+  .pill.combo .seg .chev {
+    display: inline-flex;
+    transition: transform 0.15s ease;
+  }
+  .segwrap.open .seg .chev {
+    transform: rotate(180deg);
+  }
+  .segwrap {
+    position: relative;
+    display: inline-flex;
+  }
+  .seg-menu {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 50%;
+    transform: translateX(-50%);
+    min-width: 132px;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    padding: 6px;
+    background: var(--bg-1);
+    border: 1px solid var(--line-strong);
+    border-radius: var(--r-md);
+    box-shadow: 0 18px 42px -14px rgba(0, 0, 0, 0.7);
+    z-index: 60;
+  }
+  .seg-opt {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    padding: 7px 10px;
+    border-radius: 7px;
+    color: var(--text-1);
+    text-align: left;
+    white-space: nowrap;
+    transition: background 0.12s ease, color 0.12s ease;
+  }
+  .seg-opt:hover {
+    background: var(--bg-3);
+    color: var(--text-0);
+  }
+  .seg-opt.on {
+    color: var(--bright);
+  }
+  .seg-opt .seg-check {
+    opacity: 0;
+  }
+  .seg-opt.on .seg-check {
+    opacity: 1;
+  }
+
+  .recpill {
+    background: var(--bg-0);
+    transition: background 0.16s ease, border-color 0.16s ease;
+  }
+  .recpill .rec-seg {
+    color: var(--text-0);
+  }
+  .recpill .rec-ico {
+    display: inline-flex;
+    align-items: center;
+  }
+  .recpill.on {
+    background: rgba(229, 72, 77, 0.16);
+    border-color: rgba(229, 72, 77, 0.55);
+  }
+  .recpill.on .rec-seg {
+    color: #ff6166;
+  }
+  .recpill.on .sep {
+    color: rgba(229, 72, 77, 0.45);
+  }
+  .recpill .rec-hotkey {
+    font-size: 11px;
   }
 
   .winctl {
@@ -908,34 +1165,6 @@
     overflow-y: auto;
     overflow-x: hidden;
     border-left: 1px solid var(--line);
-  }
-
-  .recbtn {
-    display: inline-flex;
-    align-items: center;
-    gap: 7px;
-    height: 28px;
-    padding: 0 12px;
-    border: 1px solid var(--line);
-    border-radius: 7px;
-    background: var(--bg-2);
-    color: var(--text-1);
-    font-size: 12px;
-    cursor: pointer;
-    transition: border-color 0.16s ease, background 0.16s ease;
-  }
-  .recbtn:hover {
-    border-color: color-mix(in srgb, var(--accent) 60%, var(--line));
-  }
-  .recbtn-dot {
-    width: 9px;
-    height: 9px;
-    border-radius: 50%;
-    background: #e5484d;
-  }
-  .recbtn.on {
-    border-color: #e5484d;
-    color: #ff6166;
   }
 
   .notice {

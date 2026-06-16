@@ -1,6 +1,7 @@
 mod artwork;
 mod capture;
 mod detect;
+mod library;
 
 #[tauri::command]
 async fn game_hero(
@@ -27,7 +28,7 @@ fn list_audio_inputs() -> Vec<capture::AudioInput> {
 }
 
 #[tauri::command]
-fn start_capture(app: tauri::AppHandle, monitor_id: String) -> Result<(), String> {
+fn start_capture(app: tauri::AppHandle, target: String) -> Result<(), String> {
     use tauri::Manager;
     let dir = app
         .path()
@@ -35,7 +36,7 @@ fn start_capture(app: tauri::AppHandle, monitor_id: String) -> Result<(), String
         .map_err(|e| e.to_string())?
         .join("clips");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    capture::start(monitor_id, dir.to_string_lossy().into_owned())
+    capture::start(target, dir.to_string_lossy().into_owned())
 }
 
 #[tauri::command]
@@ -46,6 +47,44 @@ fn stop_capture() -> Option<String> {
 #[tauri::command]
 fn capture_status() -> capture::CaptureStatus {
     capture::status()
+}
+
+#[tauri::command]
+fn start_replay(app: tauri::AppHandle, target: String, seconds: u32) -> Result<(), String> {
+    use tauri::Manager;
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("clips");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    capture::start_replay(target, dir.to_string_lossy().into_owned(), seconds)
+}
+
+#[tauri::command]
+fn stop_replay() {
+    capture::stop_replay();
+}
+
+#[tauri::command]
+fn save_replay() -> Option<String> {
+    capture::save_replay()
+}
+
+#[tauri::command]
+fn replay_active() -> bool {
+    capture::replay_active()
+}
+
+#[tauri::command]
+fn list_clips(app: tauri::AppHandle) -> Vec<library::ClipInfo> {
+    use tauri::Manager;
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map(|d| d.join("clips"))
+        .unwrap_or_default();
+    library::list_clips(dir)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -65,7 +104,12 @@ pub fn run() {
             list_audio_inputs,
             start_capture,
             stop_capture,
-            capture_status
+            capture_status,
+            list_clips,
+            start_replay,
+            stop_replay,
+            save_replay,
+            replay_active
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

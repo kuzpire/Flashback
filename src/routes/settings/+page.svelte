@@ -9,12 +9,8 @@
     hasMainKey,
     type HotkeyAction
   } from '$lib/hotkeys.svelte';
-  import { ui, setTheme, setIcon, iconSrc, type Theme, type AppIcon } from '$lib/theme.svelte';
-
-  const themes: { key: Theme; label: string }[] = [
-    { key: 'flashback', label: 'Flashback' },
-    { key: 'cursor', label: 'Cursor' }
-  ];
+  import { ui, setIcon, iconSrc, type AppIcon } from '$lib/theme.svelte';
+  import { replay, setReplayEnabled, setReplaySeconds, BUFFER_OPTIONS } from '$lib/replay.svelte';
 
   const icons: { key: AppIcon; label: string }[] = [
     { key: 'color', label: 'Color' },
@@ -25,8 +21,6 @@
   let fps = $state('60');
   let quality = $state('Alto');
   let encoder = $state('Automático');
-  let buffer = $state('1 min');
-  let replayOn = $state(true);
   let autoDelete = $state(true);
 
   const folder = 'C:\\Users\\joshiny\\Videos\\Flashback';
@@ -86,14 +80,6 @@
 
   <section class="panel">
     <span class="label panel-title">Apariencia</span>
-    <div class="setting">
-      <div class="info"><h3>Tema</h3><p>Esquema de color de la interfaz.</p></div>
-      <div class="seg">
-        {#each themes as t (t.key)}
-          <button class:on={ui.theme === t.key} onclick={() => setTheme(t.key)}>{t.label}</button>
-        {/each}
-      </div>
-    </div>
     <div class="setting">
       <div class="info"><h3>Icono de la app</h3><p>El logo de la barra lateral.</p></div>
       <div class="icon-pick">
@@ -158,16 +144,16 @@
 
     <div class="setting">
       <div class="info"><h3>Replay en segundo plano</h3><p>Mantén un buffer listo para guardar.</p></div>
-      <button class="switch" class:on={replayOn} onclick={() => (replayOn = !replayOn)} role="switch" aria-checked={replayOn} aria-label="Replay en segundo plano">
+      <button class="switch" class:on={replay.enabled} onclick={() => setReplayEnabled(!replay.enabled)} role="switch" aria-checked={replay.enabled} aria-label="Replay en segundo plano">
         <span class="knob"></span>
       </button>
     </div>
 
-    <div class="setting" class:disabled={!replayOn}>
+    <div class="setting" class:disabled={!replay.enabled}>
       <div class="info"><h3>Duración del buffer</h3><p>Cuántos segundos/minutos se guardan al pulsar el atajo.</p></div>
       <div class="seg">
-        {#each ['30 s', '1 min', '3 min', '5 min'] as o (o)}
-          <button class:on={buffer === o} onclick={() => (buffer = o)}>{o}</button>
+        {#each BUFFER_OPTIONS as o (o.seconds)}
+          <button class:on={replay.seconds === o.seconds} onclick={() => setReplaySeconds(o.seconds)}>{o.label}</button>
         {/each}
       </div>
     </div>
@@ -187,7 +173,7 @@
     </div>
   </section>
 
-  <section class="panel">
+  <section class="panel" id="atajos">
     <span class="label panel-title">Atajos</span>
     <p class="hk-hint">Pulsa <strong>Cambiar</strong>, haz la combinación (1 o 2 teclas) y pulsa <strong>Guardar</strong>.</p>
     {#each shortcutRows as row (row.key)}
