@@ -11,6 +11,13 @@
   } from '$lib/hotkeys.svelte';
   import { ui, setIcon, iconSrc, type AppIcon } from '$lib/theme.svelte';
   import { replay, setReplayEnabled, setReplaySeconds, BUFFER_OPTIONS } from '$lib/replay.svelte';
+  import {
+    captureConfig,
+    setFps,
+    setQuality,
+    FPS_OPTIONS,
+    QUALITY_OPTIONS
+  } from '$lib/capture-config.svelte';
 
   const icons: { key: AppIcon; label: string }[] = [
     { key: 'color', label: 'Color' },
@@ -18,8 +25,6 @@
   ];
 
   let res = $state('1080p');
-  let fps = $state('60');
-  let quality = $state('Alto');
   let encoder = $state('Automático');
   let autoDelete = $state(true);
 
@@ -106,10 +111,10 @@
     </div>
 
     <div class="setting">
-      <div class="info"><h3>Frecuencia</h3><p>Fotogramas por segundo.</p></div>
+      <div class="info"><h3>Frecuencia</h3><p>Fotogramas por segundo del clip.</p></div>
       <div class="seg">
-        {#each ['30', '60', '120', '144'] as o (o)}
-          <button class:on={fps === o} onclick={() => (fps = o)}>{o}</button>
+        {#each FPS_OPTIONS as o (o)}
+          <button class:on={captureConfig.fps === o} onclick={() => setFps(o)}>{o}</button>
         {/each}
       </div>
     </div>
@@ -117,8 +122,8 @@
     <div class="setting">
       <div class="info"><h3>Calidad</h3><p>Más calidad = archivos más pesados.</p></div>
       <div class="seg">
-        {#each ['Bajo', 'Medio', 'Alto', 'Ultra'] as o (o)}
-          <button class:on={quality === o} onclick={() => (quality = o)}>{o}</button>
+        {#each QUALITY_OPTIONS as o (o.key)}
+          <button class:on={captureConfig.quality === o.key} onclick={() => setQuality(o.key)}>{o.label}</button>
         {/each}
       </div>
     </div>

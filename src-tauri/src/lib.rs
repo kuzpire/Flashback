@@ -28,7 +28,12 @@ fn list_audio_inputs() -> Vec<capture::AudioInput> {
 }
 
 #[tauri::command]
-fn start_capture(app: tauri::AppHandle, target: String) -> Result<(), String> {
+fn start_capture(
+    app: tauri::AppHandle,
+    target: String,
+    fps: u32,
+    quality: String,
+) -> Result<(), String> {
     use tauri::Manager;
     let dir = app
         .path()
@@ -36,7 +41,7 @@ fn start_capture(app: tauri::AppHandle, target: String) -> Result<(), String> {
         .map_err(|e| e.to_string())?
         .join("clips");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    capture::start(target, dir.to_string_lossy().into_owned())
+    capture::start(target, dir.to_string_lossy().into_owned(), fps, quality)
 }
 
 #[tauri::command]
@@ -50,7 +55,13 @@ fn capture_status() -> capture::CaptureStatus {
 }
 
 #[tauri::command]
-fn start_replay(app: tauri::AppHandle, target: String, seconds: u32) -> Result<(), String> {
+fn start_replay(
+    app: tauri::AppHandle,
+    target: String,
+    seconds: u32,
+    fps: u32,
+    quality: String,
+) -> Result<(), String> {
     use tauri::Manager;
     let dir = app
         .path()
@@ -58,7 +69,7 @@ fn start_replay(app: tauri::AppHandle, target: String, seconds: u32) -> Result<(
         .map_err(|e| e.to_string())?
         .join("clips");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    capture::start_replay(target, dir.to_string_lossy().into_owned(), seconds)
+    capture::start_replay(target, dir.to_string_lossy().into_owned(), seconds, fps, quality)
 }
 
 #[tauri::command]

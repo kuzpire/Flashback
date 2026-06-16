@@ -11,7 +11,16 @@
   import { hotkeys, capture, labelFor } from '$lib/hotkeys.svelte';
   import { ui, iconSrc } from '$lib/theme.svelte';
   import { refreshLibrary } from '$lib/library.svelte';
-  import { replay } from '$lib/replay.svelte';
+  import { replay, setReplaySeconds, BUFFER_OPTIONS } from '$lib/replay.svelte';
+  import {
+    captureConfig,
+    setFps,
+    setQuality,
+    qualityLabel,
+    FPS_OPTIONS,
+    QUALITY_OPTIONS,
+    type QualityKey
+  } from '$lib/capture-config.svelte';
 
   let { children } = $props();
 
@@ -32,7 +41,8 @@
     thumb: string | null;
   };
   type AudioInput = { id: string; name: string };
-  type Seg = { key: string; value: string; options: { val: string; label?: string }[] };
+  type SegOpt = { val: string; label?: string; raw: number | string };
+  type Seg = { key: string; value: string; options: SegOpt[] };
 
   let monitors = $state<Monitor[]>([]);
   let selectedMonitor = $state<string | null>(null);
@@ -44,23 +54,39 @@
   let micDDOpen = $state(false);
   let openSeg = $state<string | null>(null);
 
-  // Ajustes rápidos de la barra. De momento son solo UI: el camino de captura aún no
-  // los consume (resolución/fps/calidad se fijan al implementarse la Fase 2b).
-  let segs = $state<Seg[]>([
-    { key: 'tiempo', value: '1m', options: ['15s', '30s', '1m', '2m', '3m', '4m', '5m'].map((v) => ({ val: v })) },
-    { key: 'calidad', value: 'Alta', options: ['Baja', 'Normal', 'Alta', 'Muy alta', 'Máxima'].map((v) => ({ val: v })) },
+  // Ajustes rápidos de la barra, enlazados a los stores persistidos. Tiempo → buffer del
+  // replay; calidad y FPS → config de captura (los consume el backend). Resolución es
+  // cosmética por ahora (el backend aún no reescala).
+  let resolution = $state('1080p');
+  const secondsLabel = (s: number) => BUFFER_OPTIONS.find((o) => o.seconds === s)?.label ?? `${s}s`;
+
+  const segs = $derived<Seg[]>([
+    {
+      key: 'tiempo',
+      value: secondsLabel(replay.seconds),
+      options: BUFFER_OPTIONS.map((o) => ({ val: o.label, raw: o.seconds }))
+    },
+    {
+      key: 'calidad',
+      value: qualityLabel(captureConfig.quality),
+      options: QUALITY_OPTIONS.map((q) => ({ val: q.label, raw: q.key }))
+    },
     {
       key: 'resolucion',
-      value: '1080p',
+      value: resolution,
       options: [
-        { val: '480p' },
-        { val: '720p', label: '720p HD' },
-        { val: '1080p', label: '1080p Full HD' },
-        { val: '1440p', label: '1440p 2K' },
-        { val: '2160p', label: '2160p 4K' }
+        { val: '480p', raw: '480p' },
+        { val: '720p', label: '720p HD', raw: '720p' },
+        { val: '1080p', label: '1080p Full HD', raw: '1080p' },
+        { val: '1440p', label: '1440p 2K', raw: '1440p' },
+        { val: '2160p', label: '2160p 4K', raw: '2160p' }
       ]
     },
-    { key: 'fps', value: '60 FPS', options: ['24 FPS', '30 FPS', '60 FPS', '120 FPS', '144 FPS', '240 FPS'].map((v) => ({ val: v })) }
+    {
+      key: 'fps',
+      value: `${captureConfig.fps} FPS`,
+      options: FPS_OPTIONS.map((f) => ({ val: `${f} FPS`, raw: f }))
+    }
   ]);
 
   let notice = $state<string | null>(null);
@@ -122,9 +148,12 @@
     e.stopPropagation();
     openSeg = openSeg === key ? null : key;
   }
-  function pickSeg(e: MouseEvent, seg: Seg, val: string) {
+  function pickSeg(e: MouseEvent, key: string, opt: SegOpt) {
     e.stopPropagation();
-    seg.value = val;
+    if (key === 'tiempo') setReplaySeconds(opt.raw as number);
+    else if (key === 'calidad') setQuality(opt.raw as QualityKey);
+    else if (key === 'fps') setFps(opt.raw as number);
+    else if (key === 'resolucion') resolution = opt.raw as string;
     openSeg = null;
   }
 
@@ -151,7 +180,11 @@
     }
     setNotice('Iniciando grabación…');
     try {
-      await invoke('start_capture', { target });
+      await invoke('start_capture', {
+        target,
+        fps: captureConfig.fps,
+        quality: captureConfig.quality
+      });
       setNotice(null);
       recording = true;
     } catch (e) {
@@ -299,21 +332,23 @@
   });
 
   // Instant replay: se codifica en segundo plano mientras el toggle esté activo. El
-  // efecto reacciona al toggle, a la duración y a la pantalla objetivo; `lastReplayKey`
-  // evita reinicios redundantes cuando se recargan los monitores sin cambiar el destino.
+  // efecto reacciona al toggle, a la duración, a la calidad/FPS y a la pantalla objetivo;
+  // `lastReplayKey` evita reinicios redundantes cuando nada relevante cambia.
   let lastReplayKey = '';
   $effect(() => {
     const enabled = replay.enabled;
     const seconds = replay.seconds;
+    const fps = captureConfig.fps;
+    const quality = captureConfig.quality;
     const target = captureTarget;
-    const key = enabled && target ? `${target}|${seconds}` : 'off';
+    const key = enabled && target ? `${target}|${seconds}|${fps}|${quality}` : 'off';
     if (key === lastReplayKey) return;
     lastReplayKey = key;
     (async () => {
       try {
         await invoke('stop_replay');
         if (key !== 'off') {
-          await invoke('start_replay', { target, seconds });
+          await invoke('start_replay', { target, seconds, fps, quality });
         }
       } catch (e) {
         setNotice(`No se pudo iniciar el replay: ${e}`);
@@ -508,7 +543,7 @@
                   <button
                     class="seg-opt"
                     class:on={seg.value === opt.val}
-                    onclick={(e) => pickSeg(e, seg, opt.val)}
+                    onclick={(e) => pickSeg(e, seg.key, opt)}
                   >
                     {opt.label ?? opt.val}
                     <span class="seg-check"><Icon name="check" size={13} sw={2.2} /></span>

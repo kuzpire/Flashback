@@ -44,7 +44,12 @@ pub fn list_audio_inputs() -> Vec<AudioInput> {
 }
 
 #[cfg(not(target_os = "windows"))]
-pub fn start(_monitor_id: String, _out_dir: String) -> Result<(), String> {
+pub fn start(
+    _monitor_id: String,
+    _out_dir: String,
+    _fps: u32,
+    _quality: String,
+) -> Result<(), String> {
     Err("La captura solo está disponible en Windows".into())
 }
 
@@ -59,7 +64,13 @@ pub fn status() -> CaptureStatus {
 }
 
 #[cfg(not(target_os = "windows"))]
-pub fn start_replay(_monitor_id: String, _out_dir: String, _seconds: u32) -> Result<(), String> {
+pub fn start_replay(
+    _monitor_id: String,
+    _out_dir: String,
+    _seconds: u32,
+    _fps: u32,
+    _quality: String,
+) -> Result<(), String> {
     Err("El replay solo está disponible en Windows".into())
 }
 
@@ -80,7 +91,7 @@ pub fn replay_active() -> bool {
 mod win {
     use std::collections::VecDeque;
     use std::mem::ManuallyDrop;
-    use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, AtomicUsize, Ordering};
     use std::sync::{mpsc, Arc, Condvar, Mutex, Once};
     use std::thread::JoinHandle;
     use std::time::{Duration, Instant};
@@ -202,12 +213,19 @@ mod win {
         Ok(out)
     }
 
-    pub fn start(target: String, out_dir: String) -> std::result::Result<(), String> {
+    pub fn start(
+        target: String,
+        out_dir: String,
+        fps: u32,
+        quality: String,
+    ) -> std::result::Result<(), String> {
         let mut guard = STATE.lock().unwrap();
         if guard.is_some() {
             return Ok(());
         }
 
+        let fps = clamp_fps(fps);
+        let factor = bitrate_factor(&quality);
         let stats = Arc::new(Stats::default());
         let stop = Arc::new((Mutex::new(false), Condvar::new()));
         let result = Arc::new(Mutex::new(None));
@@ -218,7 +236,9 @@ mod win {
         let result_t = result.clone();
         let handle = std::thread::Builder::new()
             .name("flashback-capture".into())
-            .spawn(move || capture_thread(target, out_dir, stop_t, stats_t, result_t, ready_tx))
+            .spawn(move || {
+                capture_thread(target, out_dir, fps, factor, stop_t, stats_t, result_t, ready_tx)
+            })
             .map_err(|e| e.to_string())?;
 
         // El hilo construye el pipeline WGC + encoder y reporta éxito o error antes
@@ -273,9 +293,12 @@ mod win {
 
     // El hilo de captura es dueño de los objetos COM/WGC: los crea con su propio
     // apartamento MTA y los suelta en el mismo hilo antes de salir.
+    #[allow(clippy::too_many_arguments)]
     fn capture_thread(
         target: String,
         out_dir: String,
+        fps: u32,
+        factor: f64,
         stop: Arc<(Mutex<bool>, Condvar)>,
         stats: Arc<Stats>,
         result: Arc<Mutex<Option<String>>>,
@@ -285,9 +308,9 @@ mod win {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         }
 
-        let engine = match resolve_target_item(&target)
-            .and_then(|item| build_engine(&stats, item, &out_dir).map_err(|e| format!("{e:?}")))
-        {
+        let engine = match resolve_target_item(&target).and_then(|item| {
+            build_engine(&stats, item, &out_dir, fps, factor).map_err(|e| format!("{e:?}"))
+        }) {
             Ok(e) => {
                 let _ = ready.send(Ok(()));
                 e
@@ -342,7 +365,13 @@ mod win {
         }
     }
 
-    fn build_engine(stats: &Arc<Stats>, item: GraphicsCaptureItem, out_dir: &str) -> Result<Engine> {
+    fn build_engine(
+        stats: &Arc<Stats>,
+        item: GraphicsCaptureItem,
+        out_dir: &str,
+        fps: u32,
+        factor: f64,
+    ) -> Result<Engine> {
         let (device, d3d_device) = create_device()?;
         // NV12/H.264 exigen dimensiones PARES (ver nota en build_replay): la ventana de un
         // juego puede ser impar y disparaba MF_E_INVALIDMEDIATYPE. Redondear a par.
@@ -351,9 +380,12 @@ mod win {
         size.Height = size.Height.max(2) & !1;
         let width = size.Width as u32;
         let height = size.Height as u32;
+        let bitrate = target_bitrate(width, height, fps, factor);
 
         let out_path = format!("{out_dir}\\{}", clip_filename());
-        let encoder = Arc::new(Mutex::new(Encoder::new(&device, width, height, out_path)?));
+        let encoder = Arc::new(Mutex::new(Encoder::new(
+            &device, width, height, fps, bitrate, out_path,
+        )?));
 
         let frame_pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
             &d3d_device,
@@ -369,8 +401,11 @@ mod win {
         // El handler corre en el pool de hilos del sistema (frame pool free-threaded):
         // recoge la textura del frame y la empuja al encoder por hardware. La textura
         // WGC se copia GPU→GPU dentro del encoder (no baja a CPU): el camino sagrado.
+        // El límite de FPS descarta frames antes de tocar la GPU para no encodear de más.
         let stats = stats.clone();
         let enc = encoder.clone();
+        let interval = fps_interval(fps);
+        let last_kept = Arc::new(AtomicI64::new(i64::MIN));
         let handler = TypedEventHandler::<Direct3D11CaptureFramePool, IInspectable>::new(
             move |pool, _| {
                 if let Some(pool) = pool.as_ref() {
@@ -379,19 +414,20 @@ mod win {
                             stats.width.store(s.Width.max(0) as u32, Ordering::Relaxed);
                             stats.height.store(s.Height.max(0) as u32, Ordering::Relaxed);
                         }
-                        if let Ok(surface) = frame.Surface() {
-                            if let Ok(access) = surface.cast::<IDirect3DDxgiInterfaceAccess>() {
-                                if let Ok(tex) = unsafe { access.GetInterface::<ID3D11Texture2D>() } {
-                                    let t = frame
-                                        .SystemRelativeTime()
-                                        .map(|x| x.Duration)
-                                        .unwrap_or(0);
-                                    let _ = enc.lock().unwrap().push(&tex, t);
+                        let t = frame.SystemRelativeTime().map(|x| x.Duration).unwrap_or(0);
+                        if keep_frame(&last_kept, t, interval) {
+                            if let Ok(surface) = frame.Surface() {
+                                if let Ok(access) = surface.cast::<IDirect3DDxgiInterfaceAccess>() {
+                                    if let Ok(tex) =
+                                        unsafe { access.GetInterface::<ID3D11Texture2D>() }
+                                    {
+                                        let _ = enc.lock().unwrap().push(&tex, t);
+                                    }
                                 }
                             }
+                            stats.frames.fetch_add(1, Ordering::Relaxed);
                         }
                         let _ = frame.Close();
-                        stats.frames.fetch_add(1, Ordering::Relaxed);
                     }
                 }
                 Ok(())
@@ -457,7 +493,14 @@ mod win {
     unsafe impl Send for Encoder {}
 
     impl Encoder {
-        fn new(device: &ID3D11Device, width: u32, height: u32, path: String) -> Result<Encoder> {
+        fn new(
+            device: &ID3D11Device,
+            width: u32,
+            height: u32,
+            fps: u32,
+            bitrate: u32,
+            path: String,
+        ) -> Result<Encoder> {
             ensure_mf();
 
             // Compartir el mismo device con MF: así el encoder lee nuestras texturas
@@ -486,12 +529,9 @@ mod win {
             let url = HSTRING::from(path.as_str());
             let writer = unsafe { MFCreateSinkWriterFromURL(&url, None, &attrs)? };
 
-            // fps nominal: WGC no entrega duplicados, así que el ritmo real lo marcan
-            // los timestamps por muestra; 60 es solo metadato/objetivo del rate control.
-            let fps = 60u32;
-            let bitrate = (((width as u64 * height as u64 * fps as u64) as f64 * 0.08) as u32)
-                .max(2_000_000);
-
+            // fps nominal: WGC no entrega duplicados, así que el ritmo real lo marcan los
+            // timestamps por muestra; aquí es metadato/objetivo del rate control. El
+            // límite real de FPS lo aplica el handler descartando frames.
             let out_type = unsafe { MFCreateMediaType()? };
             unsafe {
                 out_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
@@ -696,24 +736,27 @@ mod win {
         target: String,
         out_dir: String,
         seconds: u32,
+        fps: u32,
+        quality: String,
     ) -> std::result::Result<(), String> {
         let mut guard = REPLAY_STATE.lock().unwrap();
         if guard.is_some() {
             return Ok(());
         }
 
+        let fps = clamp_fps(fps);
+        let factor = bitrate_factor(&quality);
         let stop = Arc::new(AtomicBool::new(false));
         let stats = Arc::new(Stats::default());
-        let buffer: Arc<Mutex<ReplayBuffer>> = Arc::new(Mutex::new(ReplayBuffer::new(
-            seconds, 0, 0, 60, 0,
-        )));
+        let buffer: Arc<Mutex<ReplayBuffer>> =
+            Arc::new(Mutex::new(ReplayBuffer::new(seconds, 0, 0, fps, 0)));
         let (ready_tx, ready_rx) = mpsc::channel::<std::result::Result<(), String>>();
 
         let stop_t = stop.clone();
         let buf_t = buffer.clone();
         let handle = std::thread::Builder::new()
             .name("flashback-replay".into())
-            .spawn(move || replay_thread(target, seconds, stop_t, buf_t, stats, ready_tx))
+            .spawn(move || replay_thread(target, seconds, fps, factor, stop_t, buf_t, stats, ready_tx))
             .map_err(|e| e.to_string())?;
 
         match ready_rx.recv() {
@@ -791,9 +834,12 @@ mod win {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn replay_thread(
         target: String,
         seconds: u32,
+        fps: u32,
+        factor: f64,
         stop: Arc<AtomicBool>,
         buffer: Arc<Mutex<ReplayBuffer>>,
         stats: Arc<Stats>,
@@ -803,10 +849,10 @@ mod win {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         }
 
-        let pipe = match resolve_target_item(&target)
-            .and_then(|item| {
-                build_replay(&buffer, &stats, item, seconds).map_err(|e| format!("{e:?}"))
-            }) {
+        let _ = seconds;
+        let pipe = match resolve_target_item(&target).and_then(|item| {
+            build_replay(&buffer, &stats, item, fps, factor).map_err(|e| format!("{e:?}"))
+        }) {
             Ok(p) => {
                 let _ = ready.send(Ok(()));
                 p
@@ -859,7 +905,8 @@ mod win {
         buffer: &Arc<Mutex<ReplayBuffer>>,
         stats: &Arc<Stats>,
         item: GraphicsCaptureItem,
-        _seconds: u32,
+        fps: u32,
+        factor: f64,
     ) -> Result<ReplayPipeline> {
         ensure_mf();
         let (device, d3d_device) = create_device()?;
@@ -871,9 +918,7 @@ mod win {
         size.Height = size.Height.max(2) & !1;
         let width = size.Width as u32;
         let height = size.Height as u32;
-        let fps = 60u32;
-        let bitrate =
-            (((width as u64 * height as u64 * fps as u64) as f64 * 0.08) as u32).max(2_000_000);
+        let bitrate = target_bitrate(width, height, fps, factor);
 
         {
             let mut b = buffer.lock().unwrap();
@@ -954,31 +999,34 @@ mod win {
         let session = frame_pool.CreateCaptureSession(&item)?;
         let _ = session.SetIsBorderRequired(false);
 
+        // Límite de FPS: descartar frames antes de la copia GPU y del canal para no
+        // codificar de más (clave para los perfiles ligeros tipo 480p/20 FPS).
+        let interval = fps_interval(fps);
+        let last_kept = Arc::new(AtomicI64::new(i64::MIN));
         let stats = stats.clone();
         let feed_h = feed.clone();
         let handler = TypedEventHandler::<Direct3D11CaptureFramePool, IInspectable>::new(
             move |pool, _| {
                 if let Some(pool) = pool.as_ref() {
                     if let Ok(frame) = pool.TryGetNextFrame() {
-                        if let Ok(surface) = frame.Surface() {
-                            if let Ok(access) = surface.cast::<IDirect3DDxgiInterfaceAccess>() {
-                                if let Ok(tex) =
-                                    unsafe { access.GetInterface::<ID3D11Texture2D>() }
-                                {
-                                    let t = frame
-                                        .SystemRelativeTime()
-                                        .map(|x| x.Duration)
-                                        .unwrap_or(0);
-                                    let idx = feed_h.next.fetch_add(1, Ordering::Relaxed)
-                                        % feed_h.ring.len();
-                                    let dst = feed_h.ring[idx].clone();
-                                    unsafe { feed_h.ctx.CopyResource(&dst, &tex) };
-                                    let _ = feed_h.tx.send((SendTex(dst), t));
+                        let t = frame.SystemRelativeTime().map(|x| x.Duration).unwrap_or(0);
+                        if keep_frame(&last_kept, t, interval) {
+                            if let Ok(surface) = frame.Surface() {
+                                if let Ok(access) = surface.cast::<IDirect3DDxgiInterfaceAccess>() {
+                                    if let Ok(tex) =
+                                        unsafe { access.GetInterface::<ID3D11Texture2D>() }
+                                    {
+                                        let idx = feed_h.next.fetch_add(1, Ordering::Relaxed)
+                                            % feed_h.ring.len();
+                                        let dst = feed_h.ring[idx].clone();
+                                        unsafe { feed_h.ctx.CopyResource(&dst, &tex) };
+                                        let _ = feed_h.tx.send((SendTex(dst), t));
+                                    }
                                 }
                             }
+                            stats.frames.fetch_add(1, Ordering::Relaxed);
                         }
                         let _ = frame.Close();
-                        stats.frames.fetch_add(1, Ordering::Relaxed);
                     }
                 }
                 Ok(())
@@ -1707,6 +1755,50 @@ mod win {
 
     fn pack2(high: u32, low: u32) -> u64 {
         ((high as u64) << 32) | low as u64
+    }
+
+    // Bits por píxel y frame según calidad: a más factor, más bitrate (y tamaño).
+    fn bitrate_factor(quality: &str) -> f64 {
+        match quality {
+            "low" => 0.04,
+            "normal" => 0.06,
+            "ultra" => 0.12,
+            _ => 0.08, // "high" (por defecto)
+        }
+    }
+
+    fn clamp_fps(fps: u32) -> u32 {
+        fps.clamp(10, 240)
+    }
+
+    fn target_bitrate(width: u32, height: u32, fps: u32, factor: f64) -> u32 {
+        (((width as u64 * height as u64 * fps as u64) as f64 * factor) as u32).max(2_000_000)
+    }
+
+    // Intervalo mínimo (en unidades de 100 ns) entre frames codificados para no superar
+    // los FPS objetivo. 0 = sin límite. El límite real se aplica descartando frames en el
+    // handler de captura, antes de tocar la GPU/encoder: menos FPS = menos trabajo.
+    fn fps_interval(fps: u32) -> i64 {
+        if fps == 0 {
+            0
+        } else {
+            10_000_000 / fps as i64
+        }
+    }
+
+    // Decide si conservar un frame con timestamp `t` dado el último conservado en
+    // `last` (i64::MIN = ninguno aún). Mantiene la cadencia sin acumular deriva.
+    fn keep_frame(last: &AtomicI64, t: i64, interval: i64) -> bool {
+        if interval <= 0 {
+            return true;
+        }
+        let prev = last.load(Ordering::Relaxed);
+        if prev == i64::MIN || t - prev >= interval - interval / 10 {
+            last.store(t, Ordering::Relaxed);
+            true
+        } else {
+            false
+        }
     }
 
     // VARIANT de tipo VT_UI4 para las propiedades de ICodecAPI (GOP, etc.).
