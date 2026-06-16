@@ -2,7 +2,7 @@ const FPS_KEY = 'flashback.capture.fps';
 const QUALITY_KEY = 'flashback.capture.quality';
 const RESOLUTION_KEY = 'flashback.capture.resolution';
 
-export const FPS_OPTIONS = [20, 30, 60, 120, 144];
+export const FPS_OPTIONS = [20, 30, 60];
 
 export type QualityKey = 'low' | 'normal' | 'high' | 'ultra';
 
