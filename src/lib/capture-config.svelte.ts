@@ -1,6 +1,8 @@
 const FPS_KEY = 'flashback.capture.fps';
 const QUALITY_KEY = 'flashback.capture.quality';
 const RESOLUTION_KEY = 'flashback.capture.resolution';
+const MIC_KEY = 'flashback.capture.mic';
+const MIC_DEVICE_KEY = 'flashback.capture.micDevice';
 
 export const FPS_OPTIONS = [20, 30, 60];
 
@@ -41,12 +43,30 @@ function loadResolution(): number {
   return RES_OPTIONS.some((o) => o.height === n) ? n : 1080;
 }
 
+function loadMic(): boolean {
+  if (typeof localStorage === 'undefined') return false;
+  return localStorage.getItem(MIC_KEY) === '1';
+}
+
+function loadMicDevice(): string {
+  if (typeof localStorage === 'undefined') return '';
+  return localStorage.getItem(MIC_DEVICE_KEY) ?? '';
+}
+
 // Config de captura compartida por la barra superior y los ajustes. Alimenta el backend
-// al iniciar grabación/replay (fps + calidad + resolución).
-export const captureConfig = $state<{ fps: number; quality: QualityKey; resolution: number }>({
+// al iniciar grabación/replay (fps + calidad + resolución + micrófono).
+export const captureConfig = $state<{
+  fps: number;
+  quality: QualityKey;
+  resolution: number;
+  mic: boolean;
+  micDevice: string;
+}>({
   fps: loadFps(),
   quality: loadQuality(),
-  resolution: loadResolution()
+  resolution: loadResolution(),
+  mic: loadMic(),
+  micDevice: loadMicDevice()
 });
 
 export function qualityLabel(key: QualityKey): string {
@@ -70,6 +90,16 @@ export function setQuality(quality: QualityKey) {
 export function setResolution(height: number) {
   captureConfig.resolution = height;
   persist(RESOLUTION_KEY, String(height));
+}
+
+export function setMic(enabled: boolean) {
+  captureConfig.mic = enabled;
+  persist(MIC_KEY, enabled ? '1' : '0');
+}
+
+export function setMicDevice(id: string) {
+  captureConfig.micDevice = id;
+  persist(MIC_DEVICE_KEY, id);
 }
 
 function persist(key: string, value: string) {

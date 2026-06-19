@@ -1,12 +1,17 @@
 <script lang="ts">
-  import { getCurrentWindow } from '@tauri-apps/api/window';
+  import { getCurrentWindow, LogicalSize } from '@tauri-apps/api/window';
 
   const appWindow = getCurrentWindow();
   let maximized = $state(false);
 
   $effect(() => {
+    appWindow.setMinSize(new LogicalSize(1200, 675));
     appWindow.isMaximized().then((m) => (maximized = m));
     const unlisten = appWindow.onResized(async () => {
+      let { width, height } = await appWindow.outerSize();
+      if (width < 1200 || height < 675) {
+        await appWindow.setSize(new LogicalSize(1200, 675));
+      }
       maximized = await appWindow.isMaximized();
     });
     return () => {

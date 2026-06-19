@@ -3,6 +3,7 @@
   import { menu } from '$lib/menu.svelte';
   import { formatDuration, formatRelative, type Clip } from '$lib/clips';
   import { isFavorite, toggleFavorite } from '$lib/library.svelte';
+  import { openEditor } from '$lib/editor.svelte';
 
   let { clip }: { clip: Clip } = $props();
 
@@ -33,7 +34,7 @@
 
 <svelte:window onclick={() => (menu.openId = null)} />
 
-<article class="card" class:open onmouseenter={playPreview} onmouseleave={stopPreview}>
+<article class="card" class:open onmouseenter={playPreview} onmouseleave={stopPreview} onclick={() => openEditor(clip)} onkeydown={() => openEditor(clip)} role="presentation">
   <div class="thumb">
     {#if clip.previewSrc}
       <video
@@ -81,7 +82,7 @@
 
         {#if open}
           <div class="menu" role="menu">
-            <button role="menuitem"><Icon name="scissors" size={15} sw={1.9} /> Abrir en editor</button>
+            <button role="menuitem" onclick={() => openEditor(clip)}><Icon name="scissors" size={15} sw={1.9} /> Abrir en editor</button>
             <button role="menuitem"><Icon name="edit" size={15} sw={1.9} /> Renombrar</button>
             <button role="menuitem"><Icon name="folder" size={15} sw={1.9} /> Abrir ubicación</button>
             <div class="sep"></div>
@@ -98,7 +99,7 @@
 <style>
   .card {
     position: relative;
-    background: var(--bg-2);
+    background: #121212;
     border-radius: 4px;
   }
   .card:hover {

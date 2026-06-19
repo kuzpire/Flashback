@@ -5,6 +5,7 @@ export type Clip = {
   durationSec: number;
   sizeBytes: number;
   createdAt: Date;
+  path: string;
   trimmed?: boolean;
   edited?: boolean;
   favorite?: boolean;
@@ -20,6 +21,14 @@ export function formatDuration(sec: number): string {
   const m = Math.floor(sec / 60);
   const s = Math.floor(sec % 60);
   return `${pad2(m)}:${pad2(s)}`;
+}
+
+export function formatDurationMs(ms: number): string {
+  const totalSec = Math.floor(ms / 1000);
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  const millis = ms % 1000;
+  return `${pad2(m)}:${pad2(s)}.${String(millis).padStart(3, '0')}`;
 }
 
 export function formatSize(bytes: number): string {

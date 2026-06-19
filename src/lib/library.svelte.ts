@@ -8,6 +8,7 @@ type RawClip = {
   size_bytes: number;
   modified_ms: number;
   duration_sec: number;
+  source: string;
 };
 
 const FAV_KEY = 'flashback.favorites';
@@ -47,11 +48,12 @@ export function toggleFavorite(id: string) {
 function toClip(r: RawClip): Clip {
   return {
     id: r.id,
-    title: 'Vídeo de Flashback',
-    source: '',
+    title: r.name,
+    source: r.source,
     durationSec: r.duration_sec,
     sizeBytes: r.size_bytes,
     createdAt: new Date(r.modified_ms),
+    path: r.path,
     previewSrc: convertFileSrc(r.path)
   };
 }

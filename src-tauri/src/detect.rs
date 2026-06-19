@@ -193,17 +193,25 @@ fn detect_with(map: &GameMap) -> Option<DetectedGame> {
                 *CURRENT.lock().unwrap() = Some((pid, game.clone()));
                 return Some(game);
             }
-            // 3. Minecraft por ruta (clientes Java).
+            // 3. Minecraft (clientes Java).
             if GENERIC.contains(&base.as_str()) {
-                if let Some(path) = &path {
-                    if MINECRAFT_HINTS.iter().any(|hint| path.contains(hint)) {
-                        let game = DetectedGame {
-                            name: "Minecraft".to_string(),
-                            steam_appid: None,
-                        };
-                        *CURRENT.lock().unwrap() = Some((pid, game.clone()));
-                        return Some(game);
-                    }
+                let is_minecraft = path.as_ref().is_some_and(|p| {
+                    MINECRAFT_HINTS.iter().any(|hint| p.contains(hint))
+                }) || procs.iter().any(|(p, _)| {
+                    *p != pid
+                        && process_path(*p).is_some_and(|p2| {
+                            MINECRAFT_HINTS.iter().any(|hint| p2.contains(hint))
+                        })
+                }) || foreground_class()
+                    .zip(foreground_title())
+                    .is_some_and(|(c, t)| c == "glfw30" && t.contains("minecraft"));
+                if is_minecraft {
+                    let game = DetectedGame {
+                        name: "Minecraft".to_string(),
+                        steam_appid: None,
+                    };
+                    *CURRENT.lock().unwrap() = Some((pid, game.clone()));
+                    return Some(game);
                 }
             }
         }
@@ -290,6 +298,40 @@ fn foreground_pid() -> Option<u32> {
         let mut pid: u32 = 0;
         GetWindowThreadProcessId(hwnd, Some(&mut pid));
         (pid != 0).then_some(pid)
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn foreground_title() -> Option<String> {
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowTextW};
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.0.is_null() {
+            return None;
+        }
+        let mut buf = [0u16; 512];
+        let len = GetWindowTextW(hwnd, &mut buf);
+        if len == 0 {
+            return None;
+        }
+        Some(String::from_utf16_lossy(&buf[..len as usize]).to_lowercase())
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn foreground_class() -> Option<String> {
+    use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetClassNameW};
+    unsafe {
+        let hwnd = GetForegroundWindow();
+        if hwnd.0.is_null() {
+            return None;
+        }
+        let mut buf = [0u16; 512];
+        let len = GetClassNameW(hwnd, &mut buf);
+        if len == 0 {
+            return None;
+        }
+        Some(String::from_utf16_lossy(&buf[..len as usize]).to_lowercase())
     }
 }
 

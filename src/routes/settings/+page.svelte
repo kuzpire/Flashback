@@ -9,7 +9,7 @@
     hasMainKey,
     type HotkeyAction
   } from '$lib/hotkeys.svelte';
-  import { ui, setIcon, iconSrc, type AppIcon } from '$lib/theme.svelte';
+
   import { replay, setReplayEnabled, setReplaySeconds, BUFFER_OPTIONS } from '$lib/replay.svelte';
   import {
     captureConfig,
@@ -20,11 +20,6 @@
     QUALITY_OPTIONS,
     RES_OPTIONS
   } from '$lib/capture-config.svelte';
-
-  const icons: { key: AppIcon; label: string }[] = [
-    { key: 'color', label: 'Color' },
-    { key: 'mono', label: 'Monocromo' }
-  ];
 
   let encoder = $state('Automático');
   let autoDelete = $state(true);
@@ -83,21 +78,6 @@
 
 <div class="settings">
   <header><h1>Ajustes</h1></header>
-
-  <section class="panel">
-    <span class="label panel-title">Apariencia</span>
-    <div class="setting">
-      <div class="info"><h3>Icono de la app</h3><p>El logo de la barra lateral.</p></div>
-      <div class="icon-pick">
-        {#each icons as ic (ic.key)}
-          <button class="icon-opt" class:on={ui.icon === ic.key} onclick={() => setIcon(ic.key)}>
-            <img src={iconSrc(ic.key)} alt={ic.label} />
-            <span>{ic.label}</span>
-          </button>
-        {/each}
-      </div>
-    </div>
-  </section>
 
   <section class="panel">
     <span class="label panel-title">Captura</span>
@@ -294,40 +274,6 @@
     color: var(--on-accent);
     background: var(--accent);
     font-weight: 600;
-  }
-
-  .icon-pick {
-    display: flex;
-    flex-shrink: 0;
-    gap: 8px;
-  }
-  .icon-opt {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 7px;
-    width: 88px;
-    padding: 12px 10px 9px;
-    background: var(--bg-0);
-    border: 1px solid var(--line);
-    border-radius: var(--r-sm);
-    color: var(--text-2);
-    transition: border-color 0.14s ease, color 0.14s ease;
-  }
-  .icon-opt img {
-    width: 30px;
-    height: 30px;
-  }
-  .icon-opt span {
-    font-size: 11.5px;
-  }
-  .icon-opt:hover {
-    color: var(--text-0);
-    border-color: var(--line-strong);
-  }
-  .icon-opt.on {
-    border-color: var(--accent);
-    color: var(--text-0);
   }
 
   .switch {

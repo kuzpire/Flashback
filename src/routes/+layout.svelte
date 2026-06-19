@@ -9,9 +9,10 @@
   import { register, unregisterAll } from '@tauri-apps/plugin-global-shortcut';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { hotkeys, capture, labelFor } from '$lib/hotkeys.svelte';
-  import { ui, iconSrc } from '$lib/theme.svelte';
   import { refreshLibrary } from '$lib/library.svelte';
   import { replay, setReplaySeconds, BUFFER_OPTIONS } from '$lib/replay.svelte';
+  import Editor from '$lib/components/Editor.svelte';
+  import { editorState, closeEditor } from '$lib/editor.svelte';
   import {
     captureConfig,
     setFps,
@@ -213,7 +214,7 @@
 
   async function saveReplay() {
     if (!replay.enabled) {
-      setNotice('Activa “Replay en segundo plano” en Ajustes para guardar.');
+      setNotice('Activa "Replay en segundo plano" en Ajustes para guardar.');
       return;
     }
     if (!captureTarget) {
@@ -222,7 +223,8 @@
     }
     setNotice('Guardando replay…');
     try {
-      const path = await invoke<string | null>('save_replay');
+      const source = game || activeMonitor?.label || 'Pantalla';
+      const path = await invoke<string | null>('save_replay', { source });
       if (path) {
         setNotice(`Replay guardado: ${path}`);
         await refreshLibrary();
@@ -360,7 +362,7 @@
 <div class="app">
   <aside class="sidebar" data-tauri-drag-region>
     <div class="logo" data-tauri-drag-region>
-      <img src={iconSrc(ui.icon)} alt="Flashback" />
+      <img src="/flashback-mono.svg" alt="Flashback" />
     </div>
 
     <nav>
@@ -399,7 +401,7 @@
       <div class="capture-target">
         <button
           class="capturing"
-          class:idle={!selectedMonitor && !game}
+          class:idle={!selectedMonitor && !game && !editorState.clip}
           class:screen={!!selectedMonitor}
           class:rec={recording}
           class:open={pickerOpen}
@@ -407,28 +409,41 @@
           aria-haspopup="menu"
           aria-expanded={pickerOpen}
         >
-          {#if selectedMonitor}
+          {#if editorState.clip}
+            <span class="cap-icon">
+              <Icon name="scissors" size={20} />
+            </span>
+            <span class="cap-text">
+              <span class="cap-label">En el editor</span>
+              <span class="cap-proc"><span class="marq-main">{editorState.clip.title}</span></span>
+            </span>
+          {:else if selectedMonitor}
             <span class="cap-icon">
               {#if recording}<span class="rec-dot"></span>{:else}<Icon name="monitor" size={20} />{/if}
             </span>
           {:else}
             <span class="cap-frame" style:background-image={frame ? `url(${frame})` : 'none'}></span>
+            <span class="cap-icon" style="background: transparent; color: {game ? 'var(--bright)' : 'var(--text-2)'}">
+              <Icon name="gamepad" size={20} />
+            </span>
           {/if}
-          <span class="cap-text">
-            <span class="cap-label">
-              {#if selectedMonitor}
-                {recording ? 'Grabando pantalla' : 'Pantalla lista'}
-              {:else}
-                {game ? 'Capturando clips' : 'En espera'}
-              {/if}
+          {#if !editorState.clip}
+            <span class="cap-text">
+              <span class="cap-label">
+                {#if selectedMonitor}
+                  {recording ? 'Grabando pantalla' : 'Pantalla lista'}
+                {:else}
+                  {game ? 'Capturando clips' : 'En espera'}
+                {/if}
+              </span>
+              <span class="cap-proc">
+                {selectedMonitor ? (activeMonitor?.label ?? 'Pantalla') : game || 'Sin juego'}
+              </span>
             </span>
-            <span class="cap-proc">
-              {selectedMonitor ? (activeMonitor?.label ?? 'Pantalla') : game || 'Sin juego'}
-            </span>
-          </span>
+          {/if}
         </button>
 
-        {#if pickerOpen}
+        {#if !editorState.clip && pickerOpen}
           <div class="cap-menu" role="menu">
             <button class="cap-opt" class:on={!selectedMonitor} role="menuitem" onclick={backToApp}>
               <span class="opt-ico"><Icon name="gamepad" size={21} /></span>
@@ -521,49 +536,52 @@
         {/if}
       </div>
 
-      <span class="pill combo mono">
-        {#each segs as seg (seg.key)}
-          {#if seg.key !== 'tiempo'}<span class="sep">|</span>{/if}
-          <span class="segwrap" class:open={openSeg === seg.key}>
-            <button
-              class="seg"
-              aria-haspopup="true"
-              aria-expanded={openSeg === seg.key}
-              onclick={(e) => toggleSeg(e, seg.key)}
-            >
-              <span class="seg-val">{seg.value}</span>
-              <span class="chev"><Icon name="chevron-down" size={11} sw={2} /></span>
-            </button>
-            {#if openSeg === seg.key}
-              <div class="seg-menu" role="menu">
-                {#each seg.options as opt (opt.val)}
-                  <button
-                    class="seg-opt"
-                    class:on={seg.value === opt.val}
-                    onclick={(e) => pickSeg(e, seg.key, opt)}
-                  >
-                    {opt.label ?? opt.val}
-                    <span class="seg-check"><Icon name="check" size={13} sw={2.2} /></span>
-                  </button>
-                {/each}
-              </div>
-            {/if}
-          </span>
-        {/each}
-      </span>
-
-      <div class="quick">
-        <span class="pill combo recpill mono" class:on={recording}>
-          <button class="seg rec-seg" onclick={toggleRecording}>
-            <span class="rec-ico"><Icon name={recording ? 'stop' : 'play'} size={18} /></span>
-            <span class="rec-label">{recording ? 'Detener grabación' : 'Iniciar grabación'}</span>
-          </button>
-          <span class="sep">|</span>
-          <button class="seg rec-hotkey" title="Editar atajo de grabación" onclick={editHotkey}>
-            {labelFor(hotkeys.record)}
-          </button>
+      {#if !editorState.clip}
+        <span class="pill combo mono">
+          {#each segs as seg (seg.key)}
+            {#if seg.key !== 'tiempo'}<span class="sep">|</span>{/if}
+            <span class="segwrap" class:open={openSeg === seg.key}>
+              <button
+                class="seg"
+                aria-haspopup="true"
+                aria-expanded={openSeg === seg.key}
+                onclick={(e) => toggleSeg(e, seg.key)}
+              >
+                <span class="seg-val">{seg.value}</span>
+                <span class="chev"><Icon name="chevron-down" size={11} sw={2} /></span>
+              </button>
+              {#if openSeg === seg.key}
+                <div class="seg-menu" role="menu">
+                  {#each seg.options as opt (opt.val)}
+                    <button
+                      class="seg-opt"
+                      class:on={seg.value === opt.val}
+                      onclick={(e) => pickSeg(e, seg.key, opt)}
+                    >
+                      {opt.label ?? opt.val}
+                      <span class="seg-check"><Icon name="check" size={13} sw={2.2} /></span>
+                    </button>
+                  {/each}
+                </div>
+              {/if}
+            </span>
+          {/each}
         </span>
-      </div>
+
+        <div class="quick">
+          <span class="pill combo recpill mono" class:on={recording}>
+            <button class="seg rec-seg" onclick={toggleRecording}>
+              <span class="rec-ico"><Icon name={recording ? 'stop' : 'play'} size={18} /></span>
+              <span class="rec-label">{recording ? 'Detener grabación' : 'Iniciar grabación'}</span>
+            </button>
+            <span class="sep">|</span>
+            <button class="seg rec-hotkey" title="Editar atajo de grabación" onclick={editHotkey}>
+              {labelFor(hotkeys.record)}
+            </button>
+          </span>
+        </div>
+      {:else}<div style="flex:1"></div>
+      {/if}
 
       <div class="winctl"><WindowControls /></div>
     </header>
@@ -577,6 +595,12 @@
     {/if}
   </div>
 </div>
+
+{#if editorState.clip}
+  {#key editorState.clip.id}
+    <Editor />
+  {/key}
+{/if}
 
 <style>
   .app {
@@ -594,7 +618,7 @@
     align-items: center;
     gap: 6px;
     padding: 0 0 14px;
-    background: #171717;
+    background: #080808;
   }
   .logo {
     display: grid;
@@ -602,7 +626,6 @@
     width: 100%;
     height: var(--topbar-h);
     margin-bottom: 8px;
-    border-bottom: 1px solid var(--line);
   }
   .logo img {
     display: block;
@@ -669,7 +692,7 @@
     align-items: center;
     gap: 16px;
     padding: 0 18px;
-    background: #171717;
+    background: #080808;
     border-bottom: 1px solid var(--line);
   }
 
@@ -684,6 +707,7 @@
     display: flex;
     align-items: center;
     min-width: 240px;
+    max-width: 360px;
     padding: 0 16px;
     overflow: hidden;
     text-align: left;
@@ -696,14 +720,14 @@
     place-items: center;
     width: 34px;
     height: 34px;
-    margin-right: 11px;
+    margin: 0 11px 0 -22px;
     border-radius: var(--r-sm);
-    color: var(--accent);
-    background: var(--bg-3);
+    color: var(--bright);
+    background: #080808;
     flex-shrink: 0;
   }
   .capturing.rec .cap-icon {
-    background: color-mix(in srgb, var(--rec) 16%, var(--bg-3));
+    background: transparent;
   }
   .rec-dot {
     width: 11px;
@@ -739,7 +763,7 @@
     position: absolute;
     inset: 0;
     z-index: 1;
-    background: linear-gradient(90deg, #171717 0%, rgba(23, 23, 23, 0.55) 42%, rgba(23, 23, 23, 0) 72%);
+    background: linear-gradient(90deg, #080808 0%, rgba(8, 8, 8, 0.55) 42%, rgba(8, 8, 8, 0) 72%);
   }
   .cap-text {
     position: relative;
@@ -748,6 +772,11 @@
     flex-direction: column;
     gap: 1px;
     min-width: 0;
+    flex: 1;
+    margin-left: -4px;
+    overflow: hidden;
+    mask-image: linear-gradient(to right, transparent 0%, #000 1%, #000 99%, transparent 100%);
+    -webkit-mask-image: linear-gradient(to right, transparent 0%, #000 1%, #000 99%, transparent 100%);
   }
   .cap-label {
     font-size: 12px;
@@ -766,6 +795,21 @@
   .capturing.idle .cap-proc {
     color: var(--text-2);
     font-weight: 500;
+  }
+  .marq-main {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    min-width: 0;
+  }
+  .marq-main.scroll {
+    text-overflow: clip;
+    animation: marquee 8s linear infinite;
+  }
+  @keyframes marquee {
+    0%, 10% { transform: translateX(0); }
+    80% { transform: translateX(calc(-100% + 200px)); }
+    90%, 100% { transform: translateX(calc(-100% + 200px)); }
   }
 
   .cap-menu {
@@ -1074,7 +1118,7 @@
     padding: 6px 10px;
     font-size: 11.5px;
     color: var(--text-1);
-    background: var(--bg-2);
+    background: #101010;
     border: 1px solid var(--line);
     border-radius: var(--r-sm);
     white-space: nowrap;
@@ -1162,7 +1206,7 @@
   }
 
   .recpill {
-    background: var(--bg-0);
+    background: #101010;
     transition: background 0.16s ease, border-color 0.16s ease;
   }
   .recpill .rec-seg {

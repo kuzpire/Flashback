@@ -11,6 +11,9 @@
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
     "tauri": "tauri"
   },
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild"]
+  },
   "license": "GPL-3.0-only",
   "dependencies": {
     "@fontsource-variable/geist": "^5.2.9",

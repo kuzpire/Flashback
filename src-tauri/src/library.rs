@@ -11,6 +11,7 @@ pub struct ClipInfo {
     pub size_bytes: u64,
     pub modified_ms: i64,
     pub duration_sec: f64,
+    pub source: String,
 }
 
 pub fn list_clips(dir: PathBuf) -> Vec<ClipInfo> {
@@ -47,6 +48,12 @@ pub fn list_clips(dir: PathBuf) -> Vec<ClipInfo> {
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
+        let sidecar_path = path.with_extension("clip.json");
+        let source = std::fs::read_to_string(&sidecar_path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+            .and_then(|v| v.get("source")?.as_str().map(String::from))
+            .unwrap_or_default();
         out.push(ClipInfo {
             id,
             name,
@@ -54,6 +61,7 @@ pub fn list_clips(dir: PathBuf) -> Vec<ClipInfo> {
             size_bytes: meta.len(),
             modified_ms,
             duration_sec: mp4_duration_secs(&path).unwrap_or(0.0),
+            source,
         });
     }
     out.sort_by(|a, b| b.modified_ms.cmp(&a.modified_ms));

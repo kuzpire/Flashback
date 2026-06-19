@@ -50,6 +50,8 @@ pub fn start(
     _fps: u32,
     _quality: String,
     _resolution: u32,
+    _mic: bool,
+    _mic_device: String,
 ) -> Result<(), String> {
     Err("La captura solo está disponible en Windows".into())
 }
@@ -72,6 +74,8 @@ pub fn start_replay(
     _fps: u32,
     _quality: String,
     _resolution: u32,
+    _mic: bool,
+    _mic_device: String,
 ) -> Result<(), String> {
     Err("El replay solo está disponible en Windows".into())
 }
@@ -80,7 +84,7 @@ pub fn start_replay(
 pub fn stop_replay() {}
 
 #[cfg(not(target_os = "windows"))]
-pub fn save_replay() -> Option<String> {
+pub fn save_replay(_source: &str) -> Option<String> {
     None
 }
 
@@ -145,6 +149,7 @@ mod win {
     };
 
     use super::{AudioInput, CaptureStatus, MonitorInfo};
+    use crate::audio;
 
     #[derive(Default)]
     struct Stats {
@@ -221,6 +226,8 @@ mod win {
         fps: u32,
         quality: String,
         resolution: u32,
+        mic: bool,
+        mic_device: String,
     ) -> std::result::Result<(), String> {
         let mut guard = STATE.lock().unwrap();
         if guard.is_some() {
@@ -241,7 +248,8 @@ mod win {
             .name("flashback-capture".into())
             .spawn(move || {
                 capture_thread(
-                    target, out_dir, fps, factor, resolution, stop_t, stats_t, result_t, ready_tx,
+                    target, out_dir, fps, factor, resolution, mic, mic_device, stop_t, stats_t,
+                    result_t, ready_tx,
                 )
             })
             .map_err(|e| e.to_string())?;
@@ -305,6 +313,8 @@ mod win {
         fps: u32,
         factor: f64,
         resolution: u32,
+        mic: bool,
+        mic_device: String,
         stop: Arc<(Mutex<bool>, Condvar)>,
         stats: Arc<Stats>,
         result: Arc<Mutex<Option<String>>>,
@@ -314,8 +324,8 @@ mod win {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         }
 
-        let engine = match resolve_target_item(&target).and_then(|item| {
-            build_engine(&stats, item, &out_dir, fps, factor, resolution)
+        let mut engine = match resolve_target_item(&target).and_then(|item| {
+            build_engine(&stats, item, &out_dir, fps, factor, resolution, mic, mic_device)
                 .map_err(|e| format!("{e:?}"))
         }) {
             Ok(e) => {
@@ -351,12 +361,24 @@ mod win {
         session: GraphicsCaptureSession,
         token: i64,
         encoder: Arc<Mutex<Encoder>>,
+        audio_tracks: Vec<audio::TrackHandle>,
+        // Se para DESPUÉS de las pistas: su flush final ve las colas completas y escribe
+        // la mezcla antes de Finalize().
+        mixer: Option<audio::MixerHandle>,
     }
 
     impl Engine {
-        fn shutdown(&self) {
+        // Cortar primero las fuentes (WGC + audio) y solo entonces dejar finalizar el
+        // encoder: ningún WriteSample debe poder correr contra Finalize().
+        fn shutdown(&mut self) {
             let _ = self.frame_pool.RemoveFrameArrived(self.token);
             let _ = self.session.Close();
+            for track in &mut self.audio_tracks {
+                track.stop();
+            }
+            if let Some(m) = self.mixer.as_mut() {
+                m.stop();
+            }
         }
 
         fn finalize_encoder(&self) -> Option<String> {
@@ -372,6 +394,7 @@ mod win {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build_engine(
         stats: &Arc<Stats>,
         item: GraphicsCaptureItem,
@@ -379,6 +402,8 @@ mod win {
         fps: u32,
         factor: f64,
         resolution: u32,
+        mic: bool,
+        mic_device: String,
     ) -> Result<Engine> {
         let (device, d3d_device) = create_device()?;
         // NV12/H.264 exigen dimensiones PARES (ver nota en build_replay): la ventana de un
@@ -393,9 +418,34 @@ mod win {
         let (out_w, out_h) = output_dims(width, height, resolution);
         let bitrate = target_bitrate(out_w, out_h, fps, factor);
 
+        // Sistema: loopback siempre, en ambos modos de captura (pantalla y aplicación).
+        // Micrófono: solo si el toggle está activo y hay dispositivo elegido. Se declara el
+        // stream con el formato AAC admisible (downmix a estéreo); la captura es a nativo.
+        let sys_native = audio::probe_format(&audio::TrackKind::SystemLoopback);
+        let mic_native = if mic && !mic_device.is_empty() {
+            let f = audio::probe_format(&audio::TrackKind::Microphone(mic_device.clone()));
+            if f.is_none() {
+                eprintln!("audio: no se pudo abrir el micrófono (device='{mic_device}')");
+            }
+            f
+        } else {
+            if mic {
+                eprintln!("audio: micrófono activado pero sin dispositivo seleccionado");
+            }
+            None
+        };
+        let sys_target = sys_native.and_then(|(r, c)| audio::aac_target_format(r, c));
+        let mic_target = mic_native.and_then(|(r, c)| audio::aac_target_format(r, c));
+        // Pista mezcla (estéreo, al rate del sistema) solo cuando hay ambas fuentes.
+        let mix_target = match (sys_target, mic_target) {
+            (Some((sys_rate, _)), Some(_)) => Some((sys_rate, 2u16)),
+            _ => None,
+        };
+
         let out_path = format!("{out_dir}\\{}", clip_filename());
         let encoder = Arc::new(Mutex::new(Encoder::new(
-            &device, width, height, out_w, out_h, fps, bitrate, out_path,
+            &device, width, height, out_w, out_h, fps, bitrate, out_path, mix_target, sys_target,
+            mic_target,
         )?));
 
         let frame_pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
@@ -445,6 +495,53 @@ mod win {
             },
         );
         let token = frame_pool.FrameArrived(&handler)?;
+
+        // Mezclador (pista 0): solo con ambas fuentes. Produce PCM estéreo y lo entrega al
+        // SinkWriter por el mismo camino que las pistas (este codifica el AAC). Se crea
+        // antes de las pistas para repartirles sus taps.
+        let mixer = match (sys_target, mic_target) {
+            (Some((sys_rate, sys_ch)), Some((mic_rate, mic_ch))) => {
+                let stream = encoder.lock().unwrap().mix_audio_stream.expect("stream de mezcla declarado");
+                let sink = Arc::new(EncoderAudioSink { encoder: encoder.clone(), stream });
+                Some(audio::spawn_mixer(
+                    sys_rate,
+                    sys_ch,
+                    mic_rate,
+                    mic_ch,
+                    sys_rate,
+                    audio::Encoding::Pcm,
+                    sink,
+                ))
+            }
+            _ => None,
+        };
+
+        let mut audio_tracks = Vec::new();
+        if let (Some((rate, ch)), Some(_)) = (sys_native, sys_target) {
+            let stream = encoder.lock().unwrap().sys_audio_stream.expect("stream de sistema declarado");
+            let sink = Arc::new(EncoderAudioSink { encoder: encoder.clone(), stream });
+            audio_tracks.push(audio::spawn_track(
+                audio::TrackKind::SystemLoopback,
+                audio::Encoding::Pcm,
+                rate,
+                ch,
+                sink,
+                mixer.as_ref().map(|m| m.system_tap()),
+            ));
+        }
+        if let (Some((rate, ch)), Some(_)) = (mic_native, mic_target) {
+            let stream = encoder.lock().unwrap().mic_audio_stream.expect("stream de mic declarado");
+            let sink = Arc::new(EncoderAudioSink { encoder: encoder.clone(), stream });
+            audio_tracks.push(audio::spawn_track(
+                audio::TrackKind::Microphone(mic_device.clone()),
+                audio::Encoding::Pcm,
+                rate,
+                ch,
+                sink,
+                mixer.as_ref().map(|m| m.mic_tap()),
+            ));
+        }
+
         session.StartCapture()?;
 
         Ok(Engine {
@@ -453,6 +550,8 @@ mod win {
             session,
             token,
             encoder,
+            audio_tracks,
+            mixer,
         })
     }
 
@@ -488,6 +587,9 @@ mod win {
     struct Encoder {
         writer: IMFSinkWriter,
         stream: u32,
+        mix_audio_stream: Option<u32>,
+        sys_audio_stream: Option<u32>,
+        mic_audio_stream: Option<u32>,
         ctx: ID3D11DeviceContext,
         pool: Vec<ID3D11Texture2D>,
         next: usize,
@@ -496,6 +598,7 @@ mod win {
         has_base: bool,
         path: String,
         finalized: bool,
+        audio_err_logged: bool,
     }
 
     // El handler de FrameArrived exige Send+Sync. El Encoder solo se toca bajo el
@@ -517,6 +620,9 @@ mod win {
             fps: u32,
             bitrate: u32,
             path: String,
+            mix_audio: Option<(u32, u16)>,
+            sys_audio: Option<(u32, u16)>,
+            mic_audio: Option<(u32, u16)>,
         ) -> Result<Encoder> {
             ensure_mf();
 
@@ -572,6 +678,22 @@ mod win {
                 writer.SetInputMediaType(stream, &in_type, None)?;
             }
 
+            // PCM crudo de entrada: el SinkWriter resuelve su propio MFT AAC, igual que
+            // ya resuelve el MFT H.264 a partir del tipo de vídeo declarado arriba. La
+            // mezcla se declara primero para que sea la pista de audio por defecto.
+            let mix_audio_stream = match mix_audio {
+                Some((rate, ch)) => Some(add_aac_stream(&writer, rate, ch)?),
+                None => None,
+            };
+            let sys_audio_stream = match sys_audio {
+                Some((rate, ch)) => Some(add_aac_stream(&writer, rate, ch)?),
+                None => None,
+            };
+            let mic_audio_stream = match mic_audio {
+                Some((rate, ch)) => Some(add_aac_stream(&writer, rate, ch)?),
+                None => None,
+            };
+
             unsafe { writer.BeginWriting()? };
 
             // Anillo de texturas propias: WGC reutiliza las suyas en cuanto soltamos
@@ -603,6 +725,9 @@ mod win {
             Ok(Encoder {
                 writer,
                 stream,
+                mix_audio_stream,
+                sys_audio_stream,
+                mic_audio_stream,
                 ctx,
                 pool,
                 next: 0,
@@ -611,7 +736,52 @@ mod win {
                 has_base: false,
                 path,
                 finalized: false,
+                audio_err_logged: false,
             })
+        }
+
+        // El audio no se ancla a keyframes: cada paquete AAC es independiente. La base
+        // de tiempo es compartida con el vídeo (gana el primer push, sea cual sea), así
+        // que se acota a 0 por si una pista de audio arranca un pelín antes que el vídeo.
+        fn push_audio(&mut self, stream: u32, data: Vec<u8>, time: i64, dur: i64) {
+            let ts = if self.has_base {
+                (time - self.base).max(0)
+            } else {
+                self.has_base = true;
+                self.base = time;
+                0
+            };
+            let len = data.len();
+            let Ok(mf_buf) = (unsafe { MFCreateMemoryBuffer(len as u32) }) else {
+                return;
+            };
+            let ok = unsafe {
+                let mut ptr: *mut u8 = std::ptr::null_mut();
+                if mf_buf.Lock(&mut ptr, None, None).is_err() {
+                    false
+                } else {
+                    std::ptr::copy_nonoverlapping(data.as_ptr(), ptr, len);
+                    let _ = mf_buf.Unlock();
+                    mf_buf.SetCurrentLength(len as u32).is_ok()
+                }
+            };
+            if !ok {
+                return;
+            }
+            let Ok(sample) = (unsafe { MFCreateSample() }) else {
+                return;
+            };
+            unsafe {
+                let _ = sample.AddBuffer(&mf_buf);
+                let _ = sample.SetSampleTime(ts);
+                let _ = sample.SetSampleDuration(dur);
+                if let Err(e) = self.writer.WriteSample(stream, &sample) {
+                    if !self.audio_err_logged {
+                        self.audio_err_logged = true;
+                        eprintln!("audio (grabación manual): WriteSample del audio falló: {e:?}");
+                    }
+                }
+            }
         }
 
         fn push(&mut self, src: &ID3D11Texture2D, time: i64) -> Result<()> {
@@ -677,6 +847,71 @@ mod win {
         key: bool,
     }
 
+    // Cada paquete AAC es independiente (no hay GOP/keyframes), así que se poda por
+    // tiempo sin anclar a nada: simplemente se descartan los más viejos que la ventana.
+    struct AudioTrackBuf {
+        packets: VecDeque<Packet>,
+        sample_rate: u32,
+        channels: u16,
+        bitrate: u32,
+        user_data: Vec<u8>,
+        payload_type: u32,
+        window_ns: i64,
+    }
+
+    impl AudioTrackBuf {
+        fn new(sample_rate: u32, channels: u16, bitrate: u32, window_ns: i64) -> AudioTrackBuf {
+            AudioTrackBuf {
+                packets: VecDeque::new(),
+                sample_rate,
+                channels,
+                bitrate,
+                user_data: Vec::new(),
+                payload_type: 0,
+                window_ns,
+            }
+        }
+
+        fn push(&mut self, data: Vec<u8>, time: i64, dur: i64) {
+            self.packets.push_back(Packet { data, time, dur, key: false });
+            let Some(latest) = self.packets.back().map(|p| p.time) else {
+                return;
+            };
+            let cutoff = latest - self.window_ns;
+            while let Some(front) = self.packets.front() {
+                if front.time <= cutoff {
+                    self.packets.pop_front();
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+
+    // Copia inmutable de una pista de audio del ring buffer, lista para muxear sin
+    // mantener el lock de ReplayBuffer mientras se escribe a disco.
+    struct AudioMuxTrack {
+        packets: Vec<(Vec<u8>, i64, i64)>,
+        sample_rate: u32,
+        channels: u16,
+        bitrate: u32,
+        user_data: Vec<u8>,
+        payload_type: u32,
+    }
+
+    impl From<&AudioTrackBuf> for AudioMuxTrack {
+        fn from(t: &AudioTrackBuf) -> AudioMuxTrack {
+            AudioMuxTrack {
+                packets: t.packets.iter().map(|p| (p.data.clone(), p.time, p.dur)).collect(),
+                sample_rate: t.sample_rate,
+                channels: t.channels,
+                bitrate: t.bitrate,
+                user_data: t.user_data.clone(),
+                payload_type: t.payload_type,
+            }
+        }
+    }
+
     struct ReplayBuffer {
         packets: VecDeque<Packet>,
         seq_header: Vec<u8>,
@@ -685,6 +920,10 @@ mod win {
         fps: u32,
         bitrate: u32,
         window_ns: i64,
+        // Pista 0 = mezcla (sistema + micro): la que suena por defecto en cualquier player.
+        mix_audio: Option<AudioTrackBuf>,
+        sys_audio: Option<AudioTrackBuf>,
+        mic_audio: Option<AudioTrackBuf>,
     }
 
     impl ReplayBuffer {
@@ -697,6 +936,52 @@ mod win {
                 fps,
                 bitrate,
                 window_ns: seconds.max(1) as i64 * 10_000_000,
+                mix_audio: None,
+                sys_audio: None,
+                mic_audio: None,
+            }
+        }
+
+        fn init_audio(
+            &mut self,
+            sys: Option<(u32, u16)>,
+            mic: Option<(u32, u16)>,
+            mix: Option<(u32, u16)>,
+        ) {
+            if let Some((rate, ch)) = mix {
+                self.mix_audio = Some(AudioTrackBuf::new(rate, ch, aac_bitrate(ch), self.window_ns));
+            }
+            if let Some((rate, ch)) = sys {
+                self.sys_audio = Some(AudioTrackBuf::new(rate, ch, aac_bitrate(ch), self.window_ns));
+            }
+            if let Some((rate, ch)) = mic {
+                self.mic_audio = Some(AudioTrackBuf::new(rate, ch, aac_bitrate(ch), self.window_ns));
+            }
+        }
+
+        fn track_mut(&mut self, role: AudioRole) -> Option<&mut AudioTrackBuf> {
+            match role {
+                AudioRole::Mix => self.mix_audio.as_mut(),
+                AudioRole::Sys => self.sys_audio.as_mut(),
+                AudioRole::Mic => self.mic_audio.as_mut(),
+            }
+        }
+
+        fn push_audio(&mut self, role: AudioRole, data: Vec<u8>, time: i64, dur: i64) {
+            if let Some(t) = self.track_mut(role) {
+                t.push(data, time, dur);
+            }
+        }
+
+        fn set_user_data(&mut self, role: AudioRole, data: Vec<u8>) {
+            if let Some(t) = self.track_mut(role) {
+                t.user_data = data;
+            }
+        }
+
+        fn set_payload_type(&mut self, role: AudioRole, v: u32) {
+            if let Some(t) = self.track_mut(role) {
+                t.payload_type = v;
             }
         }
 
@@ -750,6 +1035,7 @@ mod win {
     unsafe impl Send for FeedCtx {}
     unsafe impl Sync for FeedCtx {}
 
+    #[allow(clippy::too_many_arguments)]
     pub fn start_replay(
         target: String,
         out_dir: String,
@@ -757,6 +1043,8 @@ mod win {
         fps: u32,
         quality: String,
         resolution: u32,
+        mic: bool,
+        mic_device: String,
     ) -> std::result::Result<(), String> {
         let mut guard = REPLAY_STATE.lock().unwrap();
         if guard.is_some() {
@@ -777,7 +1065,8 @@ mod win {
             .name("flashback-replay".into())
             .spawn(move || {
                 replay_thread(
-                    target, seconds, fps, factor, resolution, stop_t, buf_t, stats, ready_tx,
+                    target, seconds, fps, factor, resolution, mic, mic_device, stop_t, buf_t,
+                    stats, ready_tx,
                 )
             })
             .map_err(|e| e.to_string())?;
@@ -816,14 +1105,14 @@ mod win {
 
     // Muxea los últimos N s del ring a un MP4 desde el último IDR. Se clona lo necesario
     // bajo el lock y se libera antes de tocar disco para no frenar el hilo de codificación.
-    pub fn save_replay() -> Option<String> {
+    pub fn save_replay(source: &str) -> Option<String> {
         let (buffer, out_dir) = {
             let guard = REPLAY_STATE.lock().unwrap();
             let r = guard.as_ref()?;
             (r.buffer.clone(), r.out_dir.clone())
         };
 
-        let (packets, seq_header, width, height, fps, bitrate) = {
+        let (packets, total, seq_header, width, height, fps, bitrate, mix_audio, sys_audio, mic_audio) = {
             let buf = buffer.lock().unwrap();
             let start = buf.packets.iter().position(|p| p.key);
             let pkts: Vec<(Vec<u8>, i64, i64, bool)> = match start {
@@ -837,23 +1126,99 @@ mod win {
             };
             (
                 pkts,
+                buf.packets.len(),
                 buf.seq_header.clone(),
                 buf.width,
                 buf.height,
                 buf.fps,
                 buf.bitrate,
+                buf.mix_audio.as_ref().map(AudioMuxTrack::from),
+                buf.sys_audio.as_ref().map(AudioMuxTrack::from),
+                buf.mic_audio.as_ref().map(AudioMuxTrack::from),
             )
         };
 
         // Sin keyframe en el buffer aún no se puede empezar el MP4 en un IDR.
         if packets.is_empty() {
+            if total == 0 {
+                eprintln!("save_replay: el ring buffer de vídeo está vacío (el encoder aún no ha producido ningún paquete)");
+            } else {
+                eprintln!("save_replay: {total} paquetes en el buffer pero ninguno es keyframe todavía");
+            }
             return None;
         }
 
+        // El sink MP4 necesita el AudioSpecificConfig (user_data) de cada pista AAC para
+        // escribir el `esds`; sin él, Finalize falla con MF_E_SINK_HEADERS_NOT_FOUND. Si una
+        // pista no llegó a producir ese config (p. ej. el encoder AAC no pudo con el formato
+        // del dispositivo) se omite, y el replay se guarda solo con vídeo en vez de fallar.
+        let mix_audio = match mix_audio {
+            Some(t) if !t.user_data.is_empty() && !t.packets.is_empty() => Some(t),
+            Some(_) => {
+                eprintln!("save_replay: pista mezcla omitida (sin config AAC válida)");
+                None
+            }
+            None => None,
+        };
+        let sys_audio = match sys_audio {
+            Some(t) if !t.user_data.is_empty() && !t.packets.is_empty() => Some(t),
+            Some(_) => {
+                eprintln!("save_replay: pista de sistema omitida (sin config AAC válida)");
+                None
+            }
+            None => None,
+        };
+        let mic_audio = match mic_audio {
+            Some(t) if !t.user_data.is_empty() && !t.packets.is_empty() => Some(t),
+            Some(_) => {
+                eprintln!("save_replay: pista de micrófono omitida (sin config AAC válida)");
+                None
+            }
+            None => None,
+        };
+
         let path = format!("{out_dir}\\{}", clip_filename());
-        match mux_replay(&path, &packets, &seq_header, width, height, fps, bitrate) {
-            Ok(()) => Some(path),
-            Err(_) => None,
+        // save_replay corre en el hilo de Tauri (STA), pero el sink MP4 con AAC crea
+        // componentes de Media Foundation que exigen apartamento MTA (sin él, Finalize
+        // falla con "clase no registrada"). Se muxea en un hilo propio MTA, mismo patrón
+        // que los hilos de captura.
+        let path_t = path.clone();
+        let muxed = std::thread::spawn(move || {
+            unsafe {
+                let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+            }
+            let r = mux_replay(
+                &path_t, &packets, &seq_header, width, height, fps, bitrate, mix_audio, sys_audio,
+                mic_audio,
+            )
+            .map_err(|e| format!("{e:?}"));
+            unsafe { CoUninitialize() };
+            r
+        })
+        .join();
+
+        match muxed {
+            Ok(Ok(())) => {
+                if !source.is_empty() {
+                    let meta = serde_json::json!({"source": source});
+                    if let Ok(json) = serde_json::to_string(&meta) {
+                        let _ = std::fs::write(path.replace(".mp4", ".clip.json"), json);
+                    }
+                }
+                Some(path)
+            }
+            Ok(Err(e)) => {
+                eprintln!("save_replay: fallo al muxear el MP4: {e}");
+                // Finalize falló: el archivo a medio escribir quedaría corrupto en la
+                // biblioteca, así que lo borramos.
+                let _ = std::fs::remove_file(&path);
+                None
+            }
+            Err(_) => {
+                eprintln!("save_replay: el hilo de muxado terminó inesperadamente");
+                let _ = std::fs::remove_file(&path);
+                None
+            }
         }
     }
 
@@ -864,6 +1229,8 @@ mod win {
         fps: u32,
         factor: f64,
         resolution: u32,
+        mic: bool,
+        mic_device: String,
         stop: Arc<AtomicBool>,
         buffer: Arc<Mutex<ReplayBuffer>>,
         stats: Arc<Stats>,
@@ -874,8 +1241,8 @@ mod win {
         }
 
         let _ = seconds;
-        let pipe = match resolve_target_item(&target).and_then(|item| {
-            build_replay(&buffer, &stats, item, fps, factor, resolution)
+        let mut pipe = match resolve_target_item(&target).and_then(|item| {
+            build_replay(&buffer, &stats, item, fps, factor, resolution, mic, mic_device)
                 .map_err(|e| format!("{e:?}"))
         }) {
             Ok(p) => {
@@ -891,9 +1258,18 @@ mod win {
 
         run_pump(&pipe, &stop, &buffer);
 
-        // Parar: cortar frames, drenar el encoder y soltar el pipeline en este hilo.
+        // Parar: cortar primero las fuentes (WGC + audio) y solo entonces soltar el
+        // pipeline en este hilo.
         let _ = pipe.frame_pool.RemoveFrameArrived(pipe.token);
         let _ = pipe.session.Close();
+        for track in &mut pipe.audio_tracks {
+            track.stop();
+        }
+        // El mezclador después de las pistas: sus colas ya están completas y el flush
+        // final no pierde la cola del audio mezclado.
+        if let Some(m) = pipe.mixer.as_mut() {
+            m.stop();
+        }
         let _ = pipe.frame_pool.Close();
         drop(pipe);
         unsafe { CoUninitialize() };
@@ -916,6 +1292,13 @@ mod win {
         session: GraphicsCaptureSession,
         token: i64,
         rx: mpsc::Receiver<(SendTex, i64)>,
+        // Tiempo absoluto (WGC) del primer frame de vídeo bombeado: i64::MIN = aún sin
+        // establecer. Las pistas de audio lo leen para rebasarse al mismo origen que el
+        // vídeo (ver run_pump_async/sync y los AudioSink de más abajo).
+        video_base: Arc<AtomicI64>,
+        audio_tracks: Vec<audio::TrackHandle>,
+        // Se para DESPUÉS de las pistas: así su flush final ve las colas completas.
+        mixer: Option<audio::MixerHandle>,
     }
     unsafe impl Send for ReplayPipeline {}
 
@@ -926,6 +1309,7 @@ mod win {
         height: u32,
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build_replay(
         buffer: &Arc<Mutex<ReplayBuffer>>,
         stats: &Arc<Stats>,
@@ -933,6 +1317,8 @@ mod win {
         fps: u32,
         factor: f64,
         resolution: u32,
+        mic: bool,
+        mic_device: String,
     ) -> Result<ReplayPipeline> {
         ensure_mf();
         let (device, d3d_device) = create_device()?;
@@ -949,12 +1335,37 @@ mod win {
         let (out_w, out_h) = output_dims(width, height, resolution);
         let bitrate = target_bitrate(out_w, out_h, fps, factor);
 
+        // Sistema: loopback siempre; micrófono solo si el toggle está activo y hay
+        // dispositivo elegido (igual que en build_engine, grabación manual). El ring buffer
+        // y el mux se declaran con el formato AAC admisible (downmix a estéreo).
+        let sys_native = audio::probe_format(&audio::TrackKind::SystemLoopback);
+        let mic_native = if mic && !mic_device.is_empty() {
+            let f = audio::probe_format(&audio::TrackKind::Microphone(mic_device.clone()));
+            if f.is_none() {
+                eprintln!("audio: no se pudo abrir el micrófono (device='{mic_device}')");
+            }
+            f
+        } else {
+            if mic {
+                eprintln!("audio: micrófono activado pero sin dispositivo seleccionado");
+            }
+            None
+        };
+        let sys_target = sys_native.and_then(|(r, c)| audio::aac_target_format(r, c));
+        let mic_target = mic_native.and_then(|(r, c)| audio::aac_target_format(r, c));
+        // Pista mezcla (estéreo, al rate del sistema) solo cuando hay ambas fuentes.
+        let mix_target = match (sys_target, mic_target) {
+            (Some((sys_rate, _)), Some(_)) => Some((sys_rate, 2u16)),
+            _ => None,
+        };
+
         {
             let mut b = buffer.lock().unwrap();
             b.width = out_w;
             b.height = out_h;
             b.fps = fps;
             b.bitrate = bitrate;
+            b.init_audio(sys_target, mic_target, mix_target);
         }
 
         // Device manager compartido (zero-copy GPU) y device protegido para multihilo.
@@ -1075,6 +1486,68 @@ mod win {
                 encoder.ProcessMessage(MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0)?;
             }
         }
+
+        // Pistas de audio: se codifican a AAC ya en el hilo de captura de audio y se
+        // empujan directamente al ring buffer (no pasan por el SinkWriter, a diferencia
+        // de la grabación manual). Se rebasan contra `video_base`, que fija el propio
+        // bombeo de vídeo (run_pump_async/sync) en cuanto llega el primer frame.
+        let video_base = Arc::new(AtomicI64::new(i64::MIN));
+
+        // Mezclador: solo si hay ambas fuentes. Produce la pista 0 (mezcla) a partir del
+        // PCM "tapeado" de las dos pistas, alineado por QPC. Se crea antes de las pistas
+        // para repartirles sus taps.
+        let mixer = match (sys_target, mic_target) {
+            (Some((sys_rate, sys_ch)), Some((mic_rate, mic_ch))) => {
+                let sink = Arc::new(ReplayAudioSink {
+                    buffer: buffer.clone(),
+                    video_base: video_base.clone(),
+                    role: AudioRole::Mix,
+                });
+                Some(audio::spawn_mixer(
+                    sys_rate,
+                    sys_ch,
+                    mic_rate,
+                    mic_ch,
+                    sys_rate,
+                    audio::Encoding::Aac(aac_bitrate(2)),
+                    sink,
+                ))
+            }
+            _ => None,
+        };
+
+        let mut audio_tracks = Vec::new();
+        if let (Some((rate, ch)), Some((_, dst_ch))) = (sys_native, sys_target) {
+            let sink = Arc::new(ReplayAudioSink {
+                buffer: buffer.clone(),
+                video_base: video_base.clone(),
+                role: AudioRole::Sys,
+            });
+            audio_tracks.push(audio::spawn_track(
+                audio::TrackKind::SystemLoopback,
+                audio::Encoding::Aac(aac_bitrate(dst_ch)),
+                rate,
+                ch,
+                sink,
+                mixer.as_ref().map(|m| m.system_tap()),
+            ));
+        }
+        if let (Some((rate, ch)), Some((_, dst_ch))) = (mic_native, mic_target) {
+            let sink = Arc::new(ReplayAudioSink {
+                buffer: buffer.clone(),
+                video_base: video_base.clone(),
+                role: AudioRole::Mic,
+            });
+            audio_tracks.push(audio::spawn_track(
+                audio::TrackKind::Microphone(mic_device.clone()),
+                audio::Encoding::Aac(aac_bitrate(dst_ch)),
+                rate,
+                ch,
+                sink,
+                mixer.as_ref().map(|m| m.mic_tap()),
+            ));
+        }
+
         session.StartCapture()?;
 
         Ok(ReplayPipeline {
@@ -1091,6 +1564,9 @@ mod win {
             session,
             token,
             rx,
+            video_base,
+            audio_tracks,
+            mixer,
         })
     }
 
@@ -1254,13 +1730,103 @@ mod win {
         // y queda el GOP por defecto. DefaultBPictureCount=0 refuerza Baseline (sin
         // reordenado), de lo que depende el emparejado por FIFO de timestamps.
         if let Ok(codec) = encoder.cast::<ICodecAPI>() {
-            let gop = (fps.max(1) * 2).max(1);
+            let gop = (fps / 2).max(8).min(60);
             unsafe {
                 let _ = codec.SetValue(&CODECAPI_AVEncMPVGOPSize, &variant_u32(gop));
                 let _ = codec.SetValue(&CODECAPI_AVEncMPVDefaultBPictureCount, &variant_u32(0));
             }
         }
         Ok(())
+    }
+
+    // Valor válido de bytes/seg del encoder AAC de Media Foundation (admite 12000, 16000,
+    // 20000 y 24000 = 96/128/160/192 kbps). Fuera de esa lista el encoder rechaza el tipo.
+    fn aac_bitrate(channels: u16) -> u32 {
+        if channels <= 1 {
+            96_000
+        } else {
+            128_000
+        }
+    }
+
+    // Declara un stream de audio en el SinkWriter: entrada PCM16 cruda, salida AAC. El
+    // SinkWriter resuelve su propio MFT AAC a partir de estos tipos, igual que ya hace
+    // con el H.264 de vídeo (ver Encoder::new). El encoder selecciona por
+    // MF_MT_AUDIO_AVG_BYTES_PER_SECOND (no por MF_MT_AVG_BITRATE), de ahí ese atributo.
+    fn add_aac_stream(writer: &IMFSinkWriter, sample_rate: u32, channels: u16) -> Result<u32> {
+        let out_type = unsafe { MFCreateMediaType()? };
+        unsafe {
+            out_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)?;
+            out_type.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_AAC)?;
+            out_type.SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, sample_rate)?;
+            out_type.SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, channels as u32)?;
+            out_type.SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16)?;
+            out_type.SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, aac_bitrate(channels) / 8)?;
+            out_type.SetUINT32(&MF_MT_AAC_PAYLOAD_TYPE, 0)?;
+        }
+        let stream = unsafe { writer.AddStream(&out_type)? };
+
+        let in_type = unsafe { MFCreateMediaType()? };
+        unsafe {
+            in_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)?;
+            in_type.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_PCM)?;
+            in_type.SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, sample_rate)?;
+            in_type.SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, channels as u32)?;
+            in_type.SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16)?;
+            in_type.SetUINT32(&MF_MT_AUDIO_BLOCK_ALIGNMENT, channels as u32 * 2)?;
+            in_type.SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, sample_rate * channels as u32 * 2)?;
+            writer.SetInputMediaType(stream, &in_type, None)?;
+        }
+        Ok(stream)
+    }
+
+    // Sink que envuelve el Arc<Mutex<Encoder>> de grabación manual: el mismo mutex que
+    // ya serializa el push de vídeo serializa también el de audio.
+    struct EncoderAudioSink {
+        encoder: Arc<Mutex<Encoder>>,
+        stream: u32,
+    }
+
+    impl audio::AudioSink for EncoderAudioSink {
+        fn push(&self, data: Vec<u8>, time: i64, dur: i64) {
+            self.encoder.lock().unwrap().push_audio(self.stream, data, time, dur);
+        }
+    }
+
+    // Sink de audio del Instant Replay: empuja directamente al ring buffer (ya en AAC,
+    // sin pasar por ningún SinkWriter). Se rebasa contra `video_base` para compartir
+    // origen temporal con los paquetes de vídeo; mientras el vídeo no haya arrancado
+    // (i64::MIN) se descartan los paquetes, ya que no hay forma fiable de alinearlos.
+    #[derive(Clone, Copy)]
+    enum AudioRole {
+        Mix,
+        Sys,
+        Mic,
+    }
+
+    struct ReplayAudioSink {
+        buffer: Arc<Mutex<ReplayBuffer>>,
+        video_base: Arc<AtomicI64>,
+        role: AudioRole,
+    }
+
+    impl audio::AudioSink for ReplayAudioSink {
+        fn push(&self, data: Vec<u8>, time: i64, dur: i64) {
+            let base = self.video_base.load(Ordering::SeqCst);
+            if base == i64::MIN {
+                return;
+            }
+            let ts = (time - base).max(0);
+            self.buffer.lock().unwrap().push_audio(self.role, data, ts, dur);
+        }
+
+        fn set_user_data(&self, data: Vec<u8>) {
+            self.buffer.lock().unwrap().set_user_data(self.role, data);
+        }
+
+        fn set_payload_type(&self, v: u32) {
+            self.buffer.lock().unwrap().set_payload_type(self.role, v);
+        }
     }
 
     fn run_pump(
@@ -1322,6 +1888,7 @@ mod win {
                     Some(b) => time - b,
                     None => {
                         base = Some(time);
+                        pipe.video_base.store(time, Ordering::SeqCst);
                         0
                     }
                 };
@@ -1393,6 +1960,7 @@ mod win {
                 Some(b) => time - b,
                 None => {
                     base = Some(time);
+                    pipe.video_base.store(time, Ordering::SeqCst);
                     0
                 }
             };
@@ -1550,6 +2118,20 @@ mod win {
             let sample = unsafe { ManuallyDrop::take(&mut out.pSample) };
             if let Some(sample) = sample {
                 if let Some((data, enc_time, dur, key)) = read_sample(&sample) {
+                    // Fallback de cabecera de secuencia: muchos encoders por hardware no
+                    // exponen MF_MT_MPEG_SEQUENCE_HEADER en su tipo de salida y entregan el
+                    // SPS/PPS en banda (Annex B) dentro del keyframe. Sin esa cabecera el
+                    // sink MP4 no puede escribir el `avcC` (MF_E_SINK_HEADERS_NOT_FOUND),
+                    // así que la extraemos del propio bitstream. Se intenta en cada paquete
+                    // (no solo en los keyframe) porque algunos encoders entregan el SPS/PPS
+                    // en un paquete de configuración aparte; solo corre hasta lograrlo.
+                    if !*seq_grabbed {
+                        let ps = extract_param_sets(&data);
+                        if !ps.is_empty() {
+                            buffer.lock().unwrap().seq_header = ps;
+                            *seq_grabbed = true;
+                        }
+                    }
                     // El tiempo real lo pone el FIFO de entrada; el del encoder solo
                     // sirve de respaldo si por algún motivo el FIFO se vaciara.
                     let time = pts_fifo.pop_front().unwrap_or(enc_time);
@@ -1571,11 +2153,71 @@ mod win {
             let _ = buf.Unlock();
             let time = sample.GetSampleTime().unwrap_or(0);
             let dur = sample.GetSampleDuration().unwrap_or(166_667);
-            let key = sample.GetUINT32(&MFSampleExtension_CleanPoint).unwrap_or(0) == 1;
+            // Algunos encoders por hardware no marcan MFSampleExtension_CleanPoint en los
+            // IDR; sin ese flag el ring buffer nunca reconoce un keyframe y no se puede
+            // guardar el replay. Como respaldo, detectamos el IDR (NAL tipo 5) en el
+            // bitstream, que es la marca definitiva e independiente del encoder.
+            let key = sample.GetUINT32(&MFSampleExtension_CleanPoint).unwrap_or(0) == 1
+                || contains_idr(&data);
             Some((data, time, dur, key))
         }
     }
 
+    // True si el bitstream Annex B contiene una unidad NAL IDR (tipo 5): el inicio de un
+    // GOP por el que se puede empezar a decodificar (y por tanto a muxear el replay).
+    fn contains_idr(data: &[u8]) -> bool {
+        let mut i = 0usize;
+        while i + 3 <= data.len() {
+            if data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 {
+                let header_pos = i + 3;
+                if header_pos < data.len() && (data[header_pos] & 0x1F) == 5 {
+                    return true;
+                }
+                i += 3;
+            } else {
+                i += 1;
+            }
+        }
+        false
+    }
+
+    // Extrae las unidades NAL de parámetros (SPS=7, PPS=8) en Annex B, con su start code,
+    // de un bitstream H.264, para reconstruir MF_MT_MPEG_SEQUENCE_HEADER cuando el encoder
+    // no lo expone en su tipo de salida (ver drain_encoder_output). El sink MP4 usa este
+    // blob para el `avcC`; el formato esperado es exactamente el de la propia transmisión.
+    fn extract_param_sets(data: &[u8]) -> Vec<u8> {
+        let mut starts: Vec<usize> = Vec::new();
+        let mut i = 0usize;
+        while i + 3 <= data.len() {
+            if data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 {
+                starts.push(i);
+                i += 3;
+            } else {
+                i += 1;
+            }
+        }
+        let mut out = Vec::new();
+        for (idx, &s) in starts.iter().enumerate() {
+            let header_pos = s + 3;
+            if header_pos >= data.len() {
+                break;
+            }
+            // Incluir el 00 inicial del start code de 4 bytes (00 00 00 01) si está presente.
+            let sc_start = if s > 0 && data[s - 1] == 0 { s - 1 } else { s };
+            let end = match starts.get(idx + 1) {
+                Some(&ns) if ns > 0 && data[ns - 1] == 0 => ns - 1,
+                Some(&ns) => ns,
+                None => data.len(),
+            };
+            let nal_type = data[header_pos] & 0x1F;
+            if nal_type == 7 || nal_type == 8 {
+                out.extend_from_slice(&data[sc_start..end]);
+            }
+        }
+        out
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn mux_replay(
         path: &str,
         packets: &[(Vec<u8>, i64, i64, bool)],
@@ -1584,6 +2226,9 @@ mod win {
         height: u32,
         fps: u32,
         bitrate: u32,
+        mix_audio: Option<AudioMuxTrack>,
+        sys_audio: Option<AudioMuxTrack>,
+        mic_audio: Option<AudioMuxTrack>,
     ) -> Result<()> {
         ensure_mf();
         let url = HSTRING::from(path);
@@ -1634,6 +2279,22 @@ mod win {
         let stream = unsafe { writer.AddStream(&h264)? };
         // Passthrough: el input del stream es el mismo H.264 ya codificado.
         unsafe { writer.SetInputMediaType(stream, &h264, None)? };
+
+        // La pista mezcla se declara primero: el sink MP4 marca como audio por defecto la
+        // primera pista de audio, que es la que debe sonar "todo" al abrir el clip.
+        let mix_stream = mix_audio
+            .as_ref()
+            .map(|t| add_aac_passthrough_stream(&writer, t))
+            .transpose()?;
+        let sys_stream = sys_audio
+            .as_ref()
+            .map(|t| add_aac_passthrough_stream(&writer, t))
+            .transpose()?;
+        let mic_stream = mic_audio
+            .as_ref()
+            .map(|t| add_aac_passthrough_stream(&writer, t))
+            .transpose()?;
+
         unsafe { writer.BeginWriting()? };
 
         let base = packets[0].1;
@@ -1669,7 +2330,78 @@ mod win {
                 writer.WriteSample(stream, &sample)?;
             }
         }
+
+        if let (Some(stream), Some(track)) = (mix_stream, &mix_audio) {
+            write_audio_track(&writer, stream, track, base)?;
+        }
+        if let (Some(stream), Some(track)) = (sys_stream, &sys_audio) {
+            write_audio_track(&writer, stream, track, base)?;
+        }
+        if let (Some(stream), Some(track)) = (mic_stream, &mic_audio) {
+            write_audio_track(&writer, stream, track, base)?;
+        }
+
         unsafe { writer.Finalize()? };
+        Ok(())
+    }
+
+    // Declara un stream de audio en passthrough (entrada == salida, AAC ya codificado):
+    // mismo idioma que el H.264 de vídeo arriba. El AudioSpecificConfig (MF_MT_USER_DATA)
+    // viaja en el tipo para que el demuxer/reproductor sepa decodificar el AAC crudo.
+    fn add_aac_passthrough_stream(writer: &IMFSinkWriter, track: &AudioMuxTrack) -> Result<u32> {
+        let media_type = unsafe { MFCreateMediaType()? };
+        unsafe {
+            media_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)?;
+            media_type.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_AAC)?;
+            media_type.SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, track.sample_rate)?;
+            media_type.SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, track.channels as u32)?;
+            media_type.SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16)?;
+            // El tipo AAC debe llevar el byte-rate de AUDIO (no MF_MT_AVG_BITRATE, que es de
+            // vídeo): sin él, el sink MP4 no forma un tipo AAC completo y Finalize falla con
+            // MF_E_SINK_HEADERS_NOT_FOUND. Es el mismo atributo que usa add_aac_stream (la
+            // ruta de grabación manual, que sí funciona).
+            media_type.SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, track.bitrate / 8)?;
+            // Debe coincidir con el framing real emitido por el encoder (ver build_aac_encoder):
+            // si no, el sink MP4 genera un `esds` que el decodificador rechaza al reproducir.
+            media_type.SetUINT32(&MF_MT_AAC_PAYLOAD_TYPE, track.payload_type)?;
+            if !track.user_data.is_empty() {
+                media_type.SetBlob(&MF_MT_USER_DATA, &track.user_data)?;
+            }
+        }
+        let stream = unsafe { writer.AddStream(&media_type)? };
+        unsafe { writer.SetInputMediaType(stream, &media_type, None)? };
+        Ok(stream)
+    }
+
+    // Paquetes AAC ya codificados: se rebasan al mismo origen que el vídeo (`base`,
+    // el primer paquete de vídeo tras alinear al keyframe) y se descartan los que
+    // quedan antes de ese punto, ya que el contenedor no admite timestamps negativos.
+    fn write_audio_track(
+        writer: &IMFSinkWriter,
+        stream: u32,
+        track: &AudioMuxTrack,
+        base: i64,
+    ) -> Result<()> {
+        for (data, time, dur) in &track.packets {
+            if *time < base {
+                continue;
+            }
+            let mf_buf = unsafe { MFCreateMemoryBuffer(data.len() as u32)? };
+            unsafe {
+                let mut ptr: *mut u8 = std::ptr::null_mut();
+                mf_buf.Lock(&mut ptr, None, None)?;
+                std::ptr::copy_nonoverlapping(data.as_ptr(), ptr, data.len());
+                mf_buf.Unlock()?;
+                mf_buf.SetCurrentLength(data.len() as u32)?;
+            }
+            let sample = unsafe { MFCreateSample()? };
+            unsafe {
+                sample.AddBuffer(&mf_buf)?;
+                sample.SetSampleTime(time - base)?;
+                sample.SetSampleDuration(*dur)?;
+                writer.WriteSample(stream, &sample)?;
+            }
+        }
         Ok(())
     }
 

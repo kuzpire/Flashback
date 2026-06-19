@@ -1,6 +1,9 @@
 mod artwork;
+#[cfg(target_os = "windows")]
+mod audio;
 mod capture;
 mod detect;
+mod editor;
 mod library;
 
 #[tauri::command]
@@ -34,6 +37,8 @@ fn start_capture(
     fps: u32,
     quality: String,
     resolution: u32,
+    mic: bool,
+    mic_device: String,
 ) -> Result<(), String> {
     use tauri::Manager;
     let dir = app
@@ -42,7 +47,7 @@ fn start_capture(
         .map_err(|e| e.to_string())?
         .join("clips");
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    capture::start(target, dir.to_string_lossy().into_owned(), fps, quality, resolution)
+    capture::start(target, dir.to_string_lossy().into_owned(), fps, quality, resolution, mic, mic_device)
 }
 
 #[tauri::command]
@@ -63,6 +68,8 @@ fn start_replay(
     fps: u32,
     quality: String,
     resolution: u32,
+    mic: bool,
+    mic_device: String,
 ) -> Result<(), String> {
     use tauri::Manager;
     let dir = app
@@ -78,6 +85,8 @@ fn start_replay(
         fps,
         quality,
         resolution,
+        mic,
+        mic_device,
     )
 }
 
@@ -87,13 +96,43 @@ fn stop_replay() {
 }
 
 #[tauri::command]
-fn save_replay() -> Option<String> {
-    capture::save_replay()
+fn save_replay(source: String) -> Option<String> {
+    capture::save_replay(&source)
 }
 
 #[tauri::command]
 fn replay_active() -> bool {
     capture::replay_active()
+}
+
+#[tauri::command]
+fn prepare_clip_audio(path: String) -> Result<editor::ClipAudio, String> {
+    editor::prepare_clip_audio(path)
+}
+
+#[tauri::command]
+fn load_clip_edit(path: String) -> Result<editor::ClipEdit, String> {
+    editor::load_edit(path)
+}
+
+#[tauri::command]
+fn save_clip_edit(path: String, edit: editor::ClipEdit) -> Result<(), String> {
+    editor::save_edit(path, edit)
+}
+
+#[tauri::command]
+fn keyframe_times(path: String) -> Result<Vec<f64>, String> {
+    editor::keyframe_times(path)
+}
+
+#[tauri::command]
+fn clip_fps(path: String) -> Result<u32, String> {
+    editor::clip_fps(path)
+}
+
+#[tauri::command]
+fn export_clip(src: String, dst: String, edit: editor::ClipEdit) -> Result<(), String> {
+    editor::export_clip(src, dst, edit)
 }
 
 #[tauri::command]
@@ -112,9 +151,14 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            use tauri::Manager;
             #[cfg(desktop)]
             app.handle()
                 .plugin(tauri_plugin_global_shortcut::Builder::new().build())?;
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.set_min_size(Some(tauri::LogicalSize { width: 1200.0, height: 675.0 }));
+                let _ = w.set_size(tauri::LogicalSize { width: 1200.0, height: 675.0 });
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -126,6 +170,12 @@ pub fn run() {
             stop_capture,
             capture_status,
             list_clips,
+            prepare_clip_audio,
+            load_clip_edit,
+            save_clip_edit,
+            keyframe_times,
+            clip_fps,
+            export_clip,
             start_replay,
             stop_replay,
             save_replay,
