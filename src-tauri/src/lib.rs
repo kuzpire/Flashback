@@ -5,6 +5,8 @@ mod capture;
 mod detect;
 mod editor;
 mod library;
+#[cfg(target_os = "windows")]
+mod overlay;
 mod thumbnail;
 
 #[tauri::command]

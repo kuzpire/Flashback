@@ -1241,38 +1241,86 @@ mod win {
         }
 
         let _ = seconds;
-        let mut pipe = match resolve_target_item(&target).and_then(|item| {
-            build_replay(&buffer, &stats, item, fps, factor, resolution, mic, mic_device)
+
+        // El instant replay vive en segundo plano. En modo ventana (juego) la ventana puede
+        // estar minimizada o aún sin abrir cuando se arma: en vez de fallar, se deja armado y
+        // se espera (poll) a que sea capturable, de modo que abrir/restaurar el juego después
+        // empieza a bufferear solo, sin reactivar el replay a mano. Si la sesión se corta y no
+        // se pidió parar, se reintenta (reconexión). En modo monitor un fallo es definitivo.
+        let window_mode = target == "window";
+        let mut announced = false;
+        loop {
+            if stop.load(Ordering::SeqCst) {
+                break;
+            }
+            let built = resolve_target_item(&target).and_then(|item| {
+                build_replay(
+                    &buffer, &stats, item, fps, factor, resolution, mic, mic_device.clone(),
+                    window_mode,
+                )
                 .map_err(|e| format!("{e:?}"))
-        }) {
-            Ok(p) => {
-                let _ = ready.send(Ok(()));
-                p
+            });
+            match built {
+                Ok(pipe) => {
+                    if !announced {
+                        let _ = ready.send(Ok(()));
+                        announced = true;
+                    }
+                    run_pump(&pipe, &stop, &buffer, window_mode);
+                    teardown_replay(pipe);
+                    if stop.load(Ordering::SeqCst) || !window_mode {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    if !window_mode {
+                        if !announced {
+                            let _ = ready.send(Err(e));
+                        }
+                        break;
+                    }
+                    if !announced {
+                        let _ = ready.send(Ok(()));
+                        announced = true;
+                    }
+                }
             }
-            Err(e) => {
-                let _ = ready.send(Err(e));
-                unsafe { CoUninitialize() };
-                return;
+            if wait_or_stop(&stop, Duration::from_millis(400)) {
+                break;
             }
-        };
+        }
 
-        run_pump(&pipe, &stop, &buffer);
+        unsafe { CoUninitialize() };
+    }
 
-        // Parar: cortar primero las fuentes (WGC + audio) y solo entonces soltar el
-        // pipeline en este hilo.
+    // Duerme hasta `dur` en pasos cortos; devuelve true si se pidió parar mientras tanto, para
+    // que el bucle de espera del replay reaccione rápido a stop_replay.
+    fn wait_or_stop(stop: &Arc<AtomicBool>, dur: Duration) -> bool {
+        let step = Duration::from_millis(50);
+        let mut waited = Duration::ZERO;
+        while waited < dur {
+            if stop.load(Ordering::SeqCst) {
+                return true;
+            }
+            std::thread::sleep(step);
+            waited += step;
+        }
+        stop.load(Ordering::SeqCst)
+    }
+
+    // Cierra un pipeline de replay: primero las fuentes (WGC + audio) y solo después se suelta
+    // el pipeline, para que el flush final del audio vea las colas completas.
+    fn teardown_replay(mut pipe: ReplayPipeline) {
         let _ = pipe.frame_pool.RemoveFrameArrived(pipe.token);
         let _ = pipe.session.Close();
         for track in &mut pipe.audio_tracks {
             track.stop();
         }
-        // El mezclador después de las pistas: sus colas ya están completas y el flush
-        // final no pierde la cola del audio mezclado.
         if let Some(m) = pipe.mixer.as_mut() {
             m.stop();
         }
         let _ = pipe.frame_pool.Close();
         drop(pipe);
-        unsafe { CoUninitialize() };
     }
 
     struct ReplayPipeline {
@@ -1299,8 +1347,16 @@ mod win {
         audio_tracks: Vec<audio::TrackHandle>,
         // Se para DESPUÉS de las pistas: así su flush final ve las colas completas.
         mixer: Option<audio::MixerHandle>,
+        // Cartel "fuera de foco" (solo modo ventana): se compone una vez al minimizar y se
+        // codifica en lugar de los frames congelados. `tex` es su lienzo BGRA de salida.
+        card: Option<Card>,
     }
     unsafe impl Send for ReplayPipeline {}
+
+    struct Card {
+        overlay: crate::overlay::OutOfFocusCard,
+        tex: ID3D11Texture2D,
+    }
 
     struct SwReadback {
         ctx: ID3D11DeviceContext,
@@ -1319,6 +1375,7 @@ mod win {
         resolution: u32,
         mic: bool,
         mic_device: String,
+        window_mode: bool,
     ) -> Result<ReplayPipeline> {
         ensure_mf();
         let (device, d3d_device) = create_device()?;
@@ -1548,6 +1605,26 @@ mod win {
             ));
         }
 
+        // Cartel "fuera de foco": solo en modo ventana. Si Direct2D falla por lo que sea, se
+        // sigue sin cartel (se volverá a la pausa: no se codifica nada mientras minimizado).
+        let card = if window_mode {
+            match crate::overlay::OutOfFocusCard::new(&device, width, height) {
+                Ok(overlay) => {
+                    let tex = create_bgra_textures(&device, width, height, 1)?
+                        .into_iter()
+                        .next()
+                        .unwrap();
+                    Some(Card { overlay, tex })
+                }
+                Err(e) => {
+                    eprintln!("overlay: no se pudo crear el cartel de fuera de foco: {e:?}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         session.StartCapture()?;
 
         Ok(ReplayPipeline {
@@ -1567,6 +1644,7 @@ mod win {
             video_base,
             audio_tracks,
             mixer,
+            card,
         })
     }
 
@@ -1833,11 +1911,12 @@ mod win {
         pipe: &ReplayPipeline,
         stop: &Arc<AtomicBool>,
         buffer: &Arc<Mutex<ReplayBuffer>>,
+        window_mode: bool,
     ) {
         if pipe.enc_events.is_some() {
-            run_pump_async(pipe, stop, buffer);
+            run_pump_async(pipe, stop, buffer, window_mode);
         } else {
-            run_pump_sync(pipe, stop, buffer);
+            run_pump_sync(pipe, stop, buffer, window_mode);
         }
     }
 
@@ -1847,6 +1926,7 @@ mod win {
         pipe: &ReplayPipeline,
         stop: &Arc<AtomicBool>,
         buffer: &Arc<Mutex<ReplayBuffer>>,
+        window_mode: bool,
     ) {
         let events = pipe.enc_events.as_ref().expect("async pump requiere eventos");
         let mut need: i32 = 0;
@@ -1857,12 +1937,35 @@ mod win {
         // encoder va en Baseline (sin reordenar), la N-ésima salida corresponde al
         // N-ésimo timestamp aquí: así fijamos el tiempo real del frame en cada paquete.
         let mut pts_fifo: VecDeque<i64> = VecDeque::new();
+        let mut last_pts: i64 = 0;
+        // Seguimiento de minimizado y composición del cartel "fuera de foco" (ver FocusState).
+        let mut foc = FocusState::new();
 
         while !stop.load(Ordering::SeqCst) {
+            foc.poll(window_mode, pipe);
             match pipe.rx.recv_timeout(Duration::from_millis(50)) {
-                Ok(f) => pending.push_back(f),
+                Ok(f) => {
+                    foc.note_real_frame(&f.0 .0, f.1);
+                    if !foc.minimized {
+                        pending.push_back(f);
+                    }
+                }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+
+            // Mientras el juego esté minimizado, en vez de codificar frames congelados se
+            // inyecta el cartel a baja cadencia (suficiente para keyframes; coste ínfimo).
+            if let Some(ctime) = foc.card_due() {
+                if let Some(c) = pipe.card.as_ref() {
+                    pending.push_back((SendTex(c.tex.clone()), ctime));
+                }
+            }
+            // El siguiente frame alimentado (cartel al minimizar, o real al volver) arranca un
+            // GOP nuevo. Mientras está minimizado la cola solo lleva carteles, así que el IDR
+            // cae en el cartel; al volver, en el primer frame real.
+            if foc.take_force_key() {
+                force_keyframe(pipe);
             }
 
             // Drenar eventos del encoder asíncrono sin bloquear.
@@ -1885,13 +1988,14 @@ mod win {
                     break;
                 };
                 let rebased = match base {
-                    Some(b) => time - b,
+                    Some(b) => (time - b).max(last_pts + 1),
                     None => {
                         base = Some(time);
                         pipe.video_base.store(time, Ordering::SeqCst);
                         0
                     }
                 };
+                last_pts = rebased;
 
                 // BGRA→NV12. Si el conversor no da salida (o falla) saltamos el frame
                 // pero NO descontamos `need`: el encoder sigue esperando esa entrada,
@@ -1945,48 +2049,186 @@ mod win {
         pipe: &ReplayPipeline,
         stop: &Arc<AtomicBool>,
         buffer: &Arc<Mutex<ReplayBuffer>>,
+        window_mode: bool,
     ) {
         let mut base: Option<i64> = None;
+        let mut last_pts: i64 = 0;
         let mut seq_grabbed = false;
         let mut pts_fifo: VecDeque<i64> = VecDeque::new();
+        let mut foc = FocusState::new();
 
         while !stop.load(Ordering::SeqCst) {
+            foc.poll(window_mode, pipe);
+            if foc.minimized {
+                if let Some(ctime) = foc.card_due() {
+                    if let Some(c) = pipe.card.as_ref() {
+                        if foc.take_force_key() {
+                            force_keyframe(pipe);
+                        }
+                        encode_one(
+                            pipe, buffer, &c.tex, ctime, &mut base, &mut last_pts,
+                            &mut seq_grabbed, &mut pts_fifo,
+                        );
+                    }
+                }
+                // Vaciar y descartar cualquier frame congelado que aún llegue de WGC.
+                let _ = pipe.rx.recv_timeout(Duration::from_millis(50));
+                continue;
+            }
             let (tex, time) = match pipe.rx.recv_timeout(Duration::from_millis(50)) {
                 Ok(f) => f,
                 Err(mpsc::RecvTimeoutError::Timeout) => continue,
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
             };
-            let rebased = match base {
-                Some(b) => time - b,
-                None => {
-                    base = Some(time);
-                    pipe.video_base.store(time, Ordering::SeqCst);
-                    0
-                }
-            };
-
-            let nv12 = match convert_frame(pipe, &tex.0, rebased) {
-                Ok(Some(s)) => s,
-                _ => continue,
-            };
-
-            let mut fed_ok = false;
-            for _ in 0..64 {
-                match unsafe { pipe.encoder.ProcessInput(0, &nv12, 0) } {
-                    Ok(()) => {
-                        fed_ok = true;
-                        break;
-                    }
-                    Err(e) if e.code() == MF_E_NOTACCEPTING => {
-                        let _ = drain_encoder_output(pipe, buffer, &mut seq_grabbed, &mut pts_fifo);
-                    }
-                    Err(_) => break,
-                }
+            foc.note_real_frame(&tex.0, time);
+            if foc.take_force_key() {
+                force_keyframe(pipe);
             }
-            if fed_ok {
-                pts_fifo.push_back(rebased);
-                let _ = drain_encoder_output(pipe, buffer, &mut seq_grabbed, &mut pts_fifo);
+            encode_one(
+                pipe, buffer, &tex.0, time, &mut base, &mut last_pts, &mut seq_grabbed,
+                &mut pts_fifo,
+            );
+        }
+    }
+
+    // Codifica un frame BGRA: BGRA→NV12 y entrega al encoder, drenando su salida al ring.
+    // `last_pts` mantiene los timestamps estrictamente crecientes (el cartel usa un reloj
+    // distinto al de WGC, así que sin esto podrían cruzarse al reanudar).
+    #[allow(clippy::too_many_arguments)]
+    fn encode_one(
+        pipe: &ReplayPipeline,
+        buffer: &Arc<Mutex<ReplayBuffer>>,
+        bgra: &ID3D11Texture2D,
+        time: i64,
+        base: &mut Option<i64>,
+        last_pts: &mut i64,
+        seq_grabbed: &mut bool,
+        pts_fifo: &mut VecDeque<i64>,
+    ) {
+        let rebased = match *base {
+            Some(b) => (time - b).max(*last_pts + 1),
+            None => {
+                *base = Some(time);
+                pipe.video_base.store(time, Ordering::SeqCst);
+                0
             }
+        };
+        *last_pts = rebased;
+
+        let nv12 = match convert_frame(pipe, bgra, rebased) {
+            Ok(Some(s)) => s,
+            _ => return,
+        };
+
+        let mut fed_ok = false;
+        for _ in 0..64 {
+            match unsafe { pipe.encoder.ProcessInput(0, &nv12, 0) } {
+                Ok(()) => {
+                    fed_ok = true;
+                    break;
+                }
+                Err(e) if e.code() == MF_E_NOTACCEPTING => {
+                    let _ = drain_encoder_output(pipe, buffer, seq_grabbed, pts_fifo);
+                }
+                Err(_) => break,
+            }
+        }
+        if fed_ok {
+            pts_fifo.push_back(rebased);
+            let _ = drain_encoder_output(pipe, buffer, seq_grabbed, pts_fifo);
+        }
+    }
+
+    // Seguimiento de "fuera de foco" para el bombeo del replay: detecta cuándo el juego está
+    // minimizado (sin ventana capturable) y compone una sola vez el cartel a partir del
+    // último frame real. Mientras siga minimizado, `card_due` marca cuándo emitir el cartel.
+    // Cadencia del cartel: estático, así que con pocos frames basta para ocupar el tiempo en
+    // el clip y mantener keyframes. ~2 fps (coste ínfimo).
+    const CARD_INTERVAL: Duration = Duration::from_millis(500);
+
+    struct FocusState {
+        minimized: bool,
+        last_min_check: std::time::Instant,
+        last_tex: Option<ID3D11Texture2D>,
+        last_time: i64,
+        t_anchor: std::time::Instant,
+        card_ready: bool,
+        last_card_emit: std::time::Instant,
+        // El próximo frame codificado debe forzar un IDR. Se activa al entrar y al salir de
+        // "fuera de foco" para que la transición cartel↔juego no arrastre referencias (evita
+        // ghosting) y para poder empezar el clip justo en el cambio de escena.
+        force_key: bool,
+    }
+
+    impl FocusState {
+        fn new() -> Self {
+            let now = std::time::Instant::now();
+            Self {
+                minimized: false,
+                last_min_check: now,
+                last_tex: None,
+                last_time: 0,
+                t_anchor: now,
+                card_ready: false,
+                last_card_emit: now,
+                force_key: false,
+            }
+        }
+
+        fn note_real_frame(&mut self, tex: &ID3D11Texture2D, time: i64) {
+            self.last_tex = Some(tex.clone());
+            self.last_time = time;
+            self.t_anchor = std::time::Instant::now();
+        }
+
+        fn poll(&mut self, window_mode: bool, pipe: &ReplayPipeline) {
+            if !window_mode || self.last_min_check.elapsed() < Duration::from_millis(250) {
+                return;
+            }
+            self.last_min_check = std::time::Instant::now();
+            let now_min = resolve_game_window().is_none();
+            if now_min && !self.minimized {
+                // Transición a minimizado: componer el cartel del último frame real.
+                self.card_ready = false;
+                if let (Some(c), Some(src)) = (pipe.card.as_ref(), self.last_tex.as_ref()) {
+                    match c.overlay.render(src, &c.tex) {
+                        Ok(()) => {
+                            self.card_ready = true;
+                            self.force_key = true;
+                            // Emitir el primero de inmediato.
+                            self.last_card_emit = std::time::Instant::now() - CARD_INTERVAL;
+                        }
+                        Err(e) => eprintln!("overlay: fallo al componer el cartel: {e:?}"),
+                    }
+                }
+            } else if !now_min && self.minimized {
+                // Vuelta al juego: el primer frame real arranca un GOP nuevo.
+                self.force_key = true;
+            }
+            self.minimized = now_min;
+        }
+
+        // Devuelve el timestamp (escala WGC) del cartel si toca emitirlo, o None.
+        fn card_due(&mut self) -> Option<i64> {
+            if !self.minimized || !self.card_ready || self.last_card_emit.elapsed() < CARD_INTERVAL {
+                return None;
+            }
+            self.last_card_emit = std::time::Instant::now();
+            let dt = (self.t_anchor.elapsed().as_nanos() as i64) / 100;
+            Some(self.last_time + dt)
+        }
+
+        // True una sola vez tras una transición: el llamador debe forzar un keyframe antes
+        // del siguiente ProcessInput.
+        fn take_force_key(&mut self) -> bool {
+            std::mem::take(&mut self.force_key)
+        }
+    }
+
+    // Pide al encoder que el siguiente frame de salida sea un IDR (best-effort vía ICodecAPI).
+    fn force_keyframe(pipe: &ReplayPipeline) {
+        if let Ok(codec) = pipe.encoder.cast::<ICodecAPI>() {
+            let _ = unsafe { codec.SetValue(&CODECAPI_AVEncVideoForceKeyFrame, &variant_u32(1)) };
         }
     }
 
@@ -2526,12 +2768,15 @@ mod win {
     }
 
     // Bits por píxel y frame según calidad: a más factor, más bitrate (y tamaño).
+    // Bits por píxel por frame (bitrate = ancho·alto·fps·factor). Calibrado por encima de las
+    // recomendaciones de subida de YouTube (~0.10-0.12 bpp en alta) para no sacrificar imagen:
+    // High supera esa referencia y Ultra es prácticamente transparente (2160p60 ≈ 100 Mbps).
     fn bitrate_factor(quality: &str) -> f64 {
         match quality {
             "low" => 0.04,
-            "normal" => 0.06,
-            "ultra" => 0.12,
-            _ => 0.08, // "high" (por defecto)
+            "normal" => 0.08,
+            "ultra" => 0.20,
+            _ => 0.14, // "high" (por defecto)
         }
     }
 
@@ -2539,8 +2784,10 @@ mod win {
         fps.clamp(10, 240)
     }
 
+    // Piso de 1 Mbps: solo como red de seguridad para combos extremos (p. ej. 480p/20fps/Bajo);
+    // por encima de eso los cuatro niveles de calidad se diferencian en todas las resoluciones.
     fn target_bitrate(width: u32, height: u32, fps: u32, factor: f64) -> u32 {
-        (((width as u64 * height as u64 * fps as u64) as f64 * factor) as u32).max(2_000_000)
+        (((width as u64 * height as u64 * fps as u64) as f64 * factor) as u32).max(1_000_000)
     }
 
     // Dimensiones de salida dadas las de captura y un alto objetivo (0 = nativo). Se

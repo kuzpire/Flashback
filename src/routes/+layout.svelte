@@ -180,7 +180,9 @@
         target,
         fps: captureConfig.fps,
         quality: captureConfig.quality,
-        resolution: captureConfig.resolution
+        resolution: captureConfig.resolution,
+        mic: micOn,
+        micDevice: micInput
       });
       setNotice(null);
       recording = true;
@@ -340,14 +342,16 @@
     const quality = captureConfig.quality;
     const resolution = captureConfig.resolution;
     const target = captureTarget;
-    const key = enabled && target ? `${target}|${seconds}|${fps}|${quality}|${resolution}` : 'off';
+    const mic = micOn;
+    const micDevice = micInput;
+    const key = enabled && target ? `${target}|${seconds}|${fps}|${quality}|${resolution}|${mic}|${micDevice}` : 'off';
     if (key === lastReplayKey) return;
     lastReplayKey = key;
     (async () => {
       try {
         await invoke('stop_replay');
         if (key !== 'off') {
-          await invoke('start_replay', { target, seconds, fps, quality, resolution });
+          await invoke('start_replay', { target, seconds, fps, quality, resolution, mic, micDevice });
         }
       } catch (e) {
         setNotice(`No se pudo iniciar el replay: ${e}`);
