@@ -59,6 +59,14 @@
     menu.openId = open ? null : clip.id;
   }
 
+  // Abrir el editor al pulsar la tarjeta, salvo cuando el click nace dentro del menú de
+  // acciones: soltar el botón en una opción distinta de donde se pulsó sintetiza un click
+  // sobre el contenedor del menú, y sin esta guarda subiría hasta aquí y abriría el editor.
+  function openFromCard(e: MouseEvent) {
+    if ((e.target as HTMLElement).closest('.actions')) return;
+    openEditor(clip);
+  }
+
   function favClick(e: MouseEvent) {
     e.stopPropagation();
     const wasFav = favorite;
@@ -125,7 +133,7 @@
 
 <svelte:window onclick={() => (menu.openId = null)} />
 
-<article class="card" class:open bind:this={cardEl} onmouseenter={() => (hovering = true)} onmouseleave={() => { hovering = false; videoReady = false; }} onclick={() => openEditor(clip)} onkeydown={() => openEditor(clip)} role="presentation">
+<article class="card" class:open bind:this={cardEl} onmouseenter={() => (hovering = true)} onmouseleave={() => { hovering = false; videoReady = false; }} onclick={openFromCard} onkeydown={() => openEditor(clip)} role="presentation">
   <div class="thumb">
     {#if poster}
       <img class="preview poster" class:hide={hovering} src={poster} alt="" draggable="false" />

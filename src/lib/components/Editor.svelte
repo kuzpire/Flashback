@@ -37,6 +37,13 @@
   let drag: Drag | null = null;
   let scrubbing = $state(false);
 
+  let overlayEl = $state<HTMLDivElement | null>(null);
+  let dockEl = $state<HTMLDivElement | null>(null);
+  // Alto del dock en px cuando el usuario lo ajusta con el tirador; null = alto natural.
+  // El stage (vídeo) ocupa el resto del alto, así que encoger el dock agranda el vídeo.
+  let dockH = $state<number | null>(null);
+  let dockDrag: { startY: number; startH: number } | null = null;
+
   let sysCanvas = $state<HTMLCanvasElement | null>(null);
   let micCanvas = $state<HTMLCanvasElement | null>(null);
   let sysPeaks = $state<number[] | null>(null);
@@ -282,7 +289,22 @@
     drag = { kind: 'seek' };
   }
 
+  function onDockGripDown(e: MouseEvent) {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    dockDrag = { startY: e.clientY, startH: dockEl?.getBoundingClientRect().height ?? 0 };
+  }
+
   function onWinMove(e: MouseEvent) {
+    if (dockDrag) {
+      // Arrastrar hacia arriba agranda el dock (vídeo más pequeño) y al revés. Se deja un
+      // mínimo para el dock y un mínimo de stage para que el vídeo nunca desaparezca.
+      const avail = overlayEl?.clientHeight ?? window.innerHeight;
+      const max = Math.max(160, avail - 35 - 200);
+      const next = dockDrag.startH + (dockDrag.startY - e.clientY);
+      dockH = Math.round(Math.max(150, Math.min(next, max)));
+      return;
+    }
     if (!drag) return;
     if (drag.kind === 'seek') {
       seekOutput(outFromClientX(e.clientX));
@@ -313,15 +335,36 @@
   }
 
   function onWinUp() {
+    if (dockDrag) {
+      dockDrag = null;
+      return;
+    }
     if (drag && drag.kind === 'move' && !drag.moved) seekOutput(outFromClientX(drag.downX));
     drag = null;
     scrubbing = false;
   }
 
+  function toggleFullscreen() {
+    if (!video) return;
+    if (document.fullscreenElement) {
+      document.exitFullscreen().catch(() => {});
+    } else {
+      // Pantalla completa sobre el propio <video>: usa el modo de medios del navegador, que
+      // escala según la proporción real del clip y llena el monitor sin depender del tamaño
+      // de la ventana (poner el contenedor en fullscreen dejaba franjas al estar maximizada).
+      video.requestFullscreen().catch(() => {});
+    }
+  }
+
   function onKey(e: KeyboardEvent) {
     if ((e.target as HTMLElement)?.tagName === 'INPUT') return;
-    if (e.key === 'Escape') close();
-    else if (e.key === 'c' || e.key === 'C') {
+    if (e.key === 'Escape') {
+      if (document.fullscreenElement) return;
+      close();
+    } else if (e.key === 'f' || e.key === 'F') {
+      e.preventDefault();
+      toggleFullscreen();
+    } else if (e.key === 'c' || e.key === 'C') {
       e.preventDefault();
       cut();
     } else if (e.key === ' ' || e.key === 'k') {
@@ -505,7 +548,7 @@
 
 <svelte:window onkeydown={onKey} onmousemove={onWinMove} onmouseup={onWinUp} />
 
-<div class="overlay">
+<div class="overlay" bind:this={overlayEl}>
   <div class="sub-bar mono">
     <div class="sub-left">
       <div class="sub-chevrons">
@@ -531,14 +574,16 @@
 
   <div class="stage">
     {#if editorState.videoSrc}
-      <video
-        bind:this={video}
-        src={editorState.videoSrc}
-        playsinline
-        onloadedmetadata={onLoaded}
-        onended={pause}
-        onclick={toggle}
-      ><track kind="captions" /></video>
+      <div class="video-fit">
+        <video
+          bind:this={video}
+          src={editorState.videoSrc}
+          playsinline
+          onloadedmetadata={onLoaded}
+          onended={pause}
+          onclick={toggle}
+        ><track kind="captions" /></video>
+      </div>
     {/if}
     {#if editorState.system}
       <audio bind:this={sysAudio} src={editorState.system} preload="auto"></audio>
@@ -554,7 +599,9 @@
     {/if}
   </div>
 
-  <div class="dock">
+  <div class="dock" bind:this={dockEl} style:height={dockH !== null ? `${dockH}px` : null}>
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="dock-grip" onmousedown={onDockGripDown} title="Arrastrar para redimensionar"></div>
     <div class="transport">
       <div class="tp-left">
         <button class="tp-btn" aria-label="Ir al inicio" onclick={() => seekOutput(0)}>
@@ -783,11 +830,22 @@
     position: relative;
     flex: 1;
     min-height: 0;
-    display: grid;
-    place-items: center;
     background: radial-gradient(120% 90% at 50% 0%, #121214 0%, #0a0a0b 70%, #060607 100%);
     overflow: hidden;
+  }
+  /* inset: 0 fija una altura definida (vía offsets) para que el vídeo, con max-height:100%,
+     se reescale al cambiar el alto del dock en vez de quedarse a tamaño fijo. */
+  .video-fit {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     padding: 22px 40px;
+  }
+  .stage video:fullscreen {
+    border-radius: 0;
+    box-shadow: none;
   }
   .stage video {
     max-width: 100%;
@@ -817,6 +875,7 @@
 
   /* ===== dock ===== */
   .dock {
+    position: relative;
     flex-shrink: 0;
     border-top: 1px solid var(--line);
     background: var(--bg-1);
@@ -824,6 +883,30 @@
     display: flex;
     flex-direction: column;
     gap: 12px;
+  }
+  .dock-grip {
+    position: absolute;
+    top: -5px;
+    left: 0;
+    right: 0;
+    height: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: ns-resize;
+    z-index: 8;
+  }
+  .dock-grip::before {
+    content: '';
+    width: 44px;
+    height: 4px;
+    border-radius: 999px;
+    background: var(--line-strong);
+    transition: background 0.14s ease, width 0.14s ease;
+  }
+  .dock-grip:hover::before {
+    background: var(--text-3);
+    width: 64px;
   }
 
   .transport {
@@ -909,7 +992,15 @@
   .act.export:hover { opacity: 0.9; background: var(--bright); color: var(--bg-0); }
 
   /* ===== timeline ===== */
-  .tl { display: flex; flex-direction: column; gap: 6px; }
+  .tl {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    flex: 1;
+    min-height: 0;
+    overflow-x: clip;
+    overflow-y: auto;
+  }
   .tl-ruler { position: relative; height: 14px; }
   .tick { position: absolute; top: 0; font-size: 10px; color: var(--text-3); white-space: nowrap; }
 
