@@ -355,23 +355,32 @@
     (async () => {
       try {
         await unregisterAll();
-        if (cancelled || paused) return;
-        await register(sr, (e) => {
-          if (e.state === 'Pressed') saveReplay();
-        });
-        if (cancelled) return;
-        await register(rec, (e) => {
-          if (e.state === 'Pressed') toggleRecording();
-        });
-        if (cancelled) return;
-        await register(op, (e) => {
-          if (e.state === 'Pressed') openFlashback();
-        });
       } catch (e) {
-        if (!cancelled) {
-          console.error('register hotkeys', e);
-          toast(`No se pudieron registrar los atajos: ${e}`, 'error');
+        console.error('unregisterAll', e);
+      }
+      if (cancelled || paused) return;
+      // Cada atajo se registra por separado: en Windows RegisterHotKey falla si la combinación
+      // ya la tiene otra app, y antes ese fallo (dentro de un try común) abortaba el registro de
+      // los siguientes, tumbando los tres atajos. Aislado, un conflicto solo pierde ese atajo.
+      const binds: { accel: string; name: string; run: () => void }[] = [
+        { accel: sr, name: 'guardar clip', run: saveReplay },
+        { accel: rec, name: 'grabación', run: toggleRecording },
+        { accel: op, name: 'abrir Flashback', run: openFlashback }
+      ];
+      const failed: string[] = [];
+      for (const b of binds) {
+        if (cancelled) return;
+        try {
+          await register(b.accel, (e) => {
+            if (e.state === 'Pressed') b.run();
+          });
+        } catch (e) {
+          console.error('register hotkey', b.accel, e);
+          failed.push(`${b.name} (${labelFor(b.accel)})`);
         }
+      }
+      if (!cancelled && failed.length) {
+        toast(`Atajo en uso por otra app: ${failed.join(', ')}. Cámbialo en Ajustes.`, 'error');
       }
     })();
     return () => {
