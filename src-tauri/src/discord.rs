@@ -134,13 +134,20 @@ fn run() {
 
 // Detalle según captura; el juego detectado va como imagen grande (arte) + línea de estado.
 fn presence_fields(art_cache: &mut HashMap<String, String>) -> (String, String, String, String) {
+    let es = APP
+        .get()
+        .map(|app| crate::config::get_language(app) == "es")
+        .unwrap_or(false);
     let details = if crate::capture::status().running {
-        "Grabando".to_string()
+        if es { "Grabando" } else { "Recording" }
     } else if crate::capture::replay_active() {
-        "Instant Replay activo".to_string()
+        if es { "Instant Replay activo" } else { "Instant Replay active" }
+    } else if es {
+        "En la biblioteca"
     } else {
-        "En la biblioteca".to_string()
-    };
+        "In the library"
+    }
+    .to_string();
 
     match crate::detect::current_game() {
         Some(g) => {

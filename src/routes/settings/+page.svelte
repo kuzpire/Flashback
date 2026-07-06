@@ -2,6 +2,7 @@
   import { invoke } from '@tauri-apps/api/core';
   import Icon from '$lib/components/Icon.svelte';
   import Dropdown from '$lib/components/Dropdown.svelte';
+  import { t, getLocale, setLocale, LOCALES, type Locale } from '$lib/i18n.svelte';
   import { refreshLibrary } from '$lib/library.svelte';
   import {
     hotkeys,
@@ -19,6 +20,7 @@
     replaySound,
     setReplaySoundLevel,
     playReplaySound,
+    soundLabel,
     SOUND_OPTIONS
   } from '$lib/replay-sound.svelte';
   import {
@@ -26,6 +28,7 @@
     setFps,
     setQuality,
     setResolution,
+    qualityLabel,
     FPS_OPTIONS,
     QUALITY_OPTIONS,
     RES_OPTIONS
@@ -36,10 +39,11 @@
 
   const resOptions = RES_OPTIONS.map((o) => ({ label: o.label, value: o.height }));
   const fpsOptions = FPS_OPTIONS.map((o) => ({ label: `${o} fps`, value: o }));
-  const qualityOptions = QUALITY_OPTIONS.map((o) => ({ label: o.label, value: o.key }));
+  const qualityOptions = $derived(QUALITY_OPTIONS.map((o) => ({ label: qualityLabel(o.key), value: o.key })));
   const encoderOptions = ENCODER_OPTIONS.map((o) => ({ label: o, value: o }));
   const bufferOptions = BUFFER_OPTIONS.map((o) => ({ label: o.label, value: o.seconds }));
-  const soundOptions = SOUND_OPTIONS.map((o) => ({ label: o.label, value: o.key }));
+  const soundOptions = $derived(SOUND_OPTIONS.map((o) => ({ label: soundLabel(o.key), value: o.key })));
+  const languageOptions = LOCALES.map((l) => ({ label: l.label, value: l.value }));
 
   let encoder = $state<EncoderOption>('Auto');
   let autoDelete = $state(true);
@@ -83,10 +87,10 @@
     }
   }
 
-  const shortcutRows: { key: HotkeyAction; label: string }[] = [
-    { key: 'saveReplay', label: 'Guardar replay' },
-    { key: 'record', label: 'Grabar / detener' },
-    { key: 'open', label: 'Abrir Flashback' }
+  const shortcutRows: { key: HotkeyAction; labelKey: string }[] = [
+    { key: 'saveReplay', labelKey: 'settings.hk.saveReplay' },
+    { key: 'record', labelKey: 'settings.hk.record' },
+    { key: 'open', labelKey: 'settings.hk.open' }
   ];
 
   let rebinding = $state<HotkeyAction | null>(null);
@@ -145,60 +149,68 @@
 </script>
 
 <div class="settings">
-  <header><h1>Ajustes</h1></header>
+  <header><h1>{t('settings.title')}</h1></header>
 
   <section class="panel">
-    <span class="label panel-title">Captura</span>
+    <span class="label panel-title">{t('settings.section.language')}</span>
+    <div class="setting">
+      <div class="info"><h3>{t('settings.language')}</h3><p>{t('settings.language.desc')}</p></div>
+      <Dropdown value={getLocale()} options={languageOptions} onchange={(v) => setLocale(v as Locale)} ariaLabel={t('settings.language')} />
+    </div>
+  </section>
+
+  <section class="panel">
+    <span class="label panel-title">{t('settings.section.capture')}</span>
 
     <div class="setting">
       <div class="info">
-        <h3>Resolución</h3>
-        <p>Alto de salida. Se escala desde la captura nativa, sin superarla.</p>
+        <h3>{t('settings.resolution')}</h3>
+        <p>{t('settings.resolution.desc')}</p>
       </div>
-      <Dropdown value={captureConfig.resolution} options={resOptions} onchange={setResolution} ariaLabel="Resolución" />
+      <Dropdown value={captureConfig.resolution} options={resOptions} onchange={setResolution} ariaLabel={t('settings.resolution')} />
     </div>
 
     <div class="setting">
-      <div class="info"><h3>Fotogramas por segundo</h3><p>Cantidad de fotogramas grabados por segundo.</p></div>
-      <Dropdown value={captureConfig.fps} options={fpsOptions} onchange={setFps} ariaLabel="Fotogramas por segundo" />
+      <div class="info"><h3>{t('settings.fps')}</h3><p>{t('settings.fps.desc')}</p></div>
+      <Dropdown value={captureConfig.fps} options={fpsOptions} onchange={setFps} ariaLabel={t('settings.fps')} />
     </div>
 
     <div class="setting">
-      <div class="info"><h3>Calidad</h3><p>Más calidad produce archivos más pesados.</p></div>
-      <Dropdown value={captureConfig.quality} options={qualityOptions} onchange={setQuality} ariaLabel="Calidad" />
+      <div class="info"><h3>{t('settings.quality')}</h3><p>{t('settings.quality.desc')}</p></div>
+      <Dropdown value={captureConfig.quality} options={qualityOptions} onchange={setQuality} ariaLabel={t('settings.quality')} />
     </div>
 
     <div class="setting">
-      <div class="info"><h3>Replay en segundo plano</h3><p>Mantén un buffer listo para guardar.</p></div>
-      <button class="switch" class:on={replay.enabled} onclick={() => setReplayEnabled(!replay.enabled)} role="switch" aria-checked={replay.enabled} aria-label="Replay en segundo plano">
+      <div class="info"><h3>{t('settings.replayBg')}</h3><p>{t('settings.replayBg.desc')}</p></div>
+      <button class="switch" class:on={replay.enabled} onclick={() => setReplayEnabled(!replay.enabled)} role="switch" aria-checked={replay.enabled} aria-label={t('settings.replayBg')}>
         <span class="knob"></span>
       </button>
     </div>
 
     <div class="setting" class:disabled={!replay.enabled}>
-      <div class="info"><h3>Duración del buffer</h3><p>Cuántos segundos/minutos se guardan al pulsar el atajo.</p></div>
-      <Dropdown value={replay.seconds} options={bufferOptions} onchange={setReplaySeconds} ariaLabel="Duración del buffer" />
+      <div class="info"><h3>{t('settings.bufferLen')}</h3><p>{t('settings.bufferLen.desc')}</p></div>
+      <Dropdown value={replay.seconds} options={bufferOptions} onchange={setReplaySeconds} ariaLabel={t('settings.bufferLen')} />
     </div>
   </section>
 
   <section class="panel">
-    <span class="label panel-title">Codificación</span>
+    <span class="label panel-title">{t('settings.section.encoding')}</span>
     <div class="setting">
       <div class="info">
-        <h3>Encoder</h3>
-        <p>Auto elige el mejor encoder por hardware disponible. Software usa CPU.</p>
+        <h3>{t('settings.encoder')}</h3>
+        <p>{t('settings.encoder.desc')}</p>
       </div>
-      <Dropdown value={encoder} options={encoderOptions} onchange={setEncoder} ariaLabel="Encoder" />
+      <Dropdown value={encoder} options={encoderOptions} onchange={setEncoder} ariaLabel={t('settings.encoder')} />
     </div>
   </section>
 
   <section class="panel">
-    <span class="label panel-title">Sonido</span>
+    <span class="label panel-title">{t('settings.section.sound')}</span>
     <div class="setting">
-      <div class="info"><h3>Sonido al guardar</h3><p>Se reproduce un aviso al guardar un replay.</p></div>
+      <div class="info"><h3>{t('settings.saveSound')}</h3><p>{t('settings.saveSound.desc')}</p></div>
       <div class="sound-row">
-        <Dropdown value={replaySound.level} options={soundOptions} onchange={setReplaySoundLevel} ariaLabel="Volumen del sonido" />
-        <button class="play-btn" aria-label="Probar sonido" onclick={() => playReplaySound()}>
+        <Dropdown value={replaySound.level} options={soundOptions} onchange={setReplaySoundLevel} ariaLabel={t('settings.soundVolume')} />
+        <button class="play-btn" aria-label={t('settings.testSound')} onclick={() => playReplaySound()}>
           <Icon name="play" size={18} />
         </button>
       </div>
@@ -206,25 +218,25 @@
   </section>
 
   <section class="panel">
-    <span class="label panel-title">Almacenamiento</span>
+    <span class="label panel-title">{t('settings.section.storage')}</span>
     <div class="setting">
-      <div class="info"><h3>Carpeta de clips</h3><p class="mono path">{folder}</p><p>Cambiarla solo afecta a los clips nuevos; los anteriores se siguen mostrando.</p></div>
-      <button class="btn" onclick={changeFolder} disabled={changingFolder}><Icon name="folder" size={15} /> Cambiar</button>
+      <div class="info"><h3>{t('settings.clipsFolder')}</h3><p class="mono path">{folder}</p><p>{t('settings.clipsFolder.desc')}</p></div>
+      <button class="btn" onclick={changeFolder} disabled={changingFolder}><Icon name="folder" size={15} /> {t('settings.change')}</button>
     </div>
     <div class="setting">
-      <div class="info"><h3>Borrado automático</h3><p>Elimina los clips no marcados como favoritos al llenarse.</p></div>
-      <button class="switch" class:on={autoDelete} onclick={() => (autoDelete = !autoDelete)} role="switch" aria-checked={autoDelete} aria-label="Borrado automático">
+      <div class="info"><h3>{t('settings.autoDelete')}</h3><p>{t('settings.autoDelete.desc')}</p></div>
+      <button class="switch" class:on={autoDelete} onclick={() => (autoDelete = !autoDelete)} role="switch" aria-checked={autoDelete} aria-label={t('settings.autoDelete')}>
         <span class="knob"></span>
       </button>
     </div>
   </section>
 
   <section class="panel" id="atajos">
-    <span class="label panel-title">Atajos</span>
-    <p class="hk-hint">Toca un atajo, pulsa la nueva combinación y guárdala con <strong>✓</strong>. <strong>ESC</strong> cancela.</p>
+    <span class="label panel-title">{t('settings.section.shortcuts')}</span>
+    <p class="hk-hint">{@html t('settings.shortcuts.hint')}</p>
     {#each shortcutRows as row (row.key)}
       <div class="setting">
-        <div class="info"><h3>{row.label}</h3></div>
+        <div class="info"><h3>{t(row.labelKey)}</h3></div>
         <div class="hk-edit">
           <button
             type="button"
@@ -232,15 +244,15 @@
             class:rec={rebinding === row.key}
             class:bad={rebinding === row.key && badKey && liveTokens.length === 0}
             onclick={() => startRebind(row.key)}
-            aria-label={`Cambiar atajo de ${row.label}`}
+            aria-label={t('settings.hk.changeAria', { label: t(row.labelKey) })}
           >
             {#if rebinding === row.key}
               {#if liveTokens.length}
                 {labelFor(liveTokens.join('+'))}
               {:else if badKey}
-                Tecla no compatible
+                {t('settings.hk.badKey')}
               {:else}
-                Pulsa una tecla…
+                {t('settings.hk.pressKey')}
               {/if}
             {:else}
               {labelFor(hotkeys[row.key])}
@@ -252,7 +264,7 @@
               class="combo-save"
               disabled={!canSave}
               onclick={() => endCapture(true)}
-              aria-label="Guardar atajo"
+              aria-label={t('settings.hk.saveAria')}
             >
               <Icon name="check" size={12} sw={3} />
             </button>
@@ -263,13 +275,13 @@
   </section>
 
   <section class="panel">
-    <span class="label panel-title">Integraciones</span>
+    <span class="label panel-title">{t('settings.section.integrations')}</span>
     <div class="setting">
       <div class="info">
-        <h3>Discord Rich Presence</h3>
-        <p>Muestra en tu perfil de Discord que usas Flashback, con el juego detectado.</p>
+        <h3>{t('settings.discordRpc')}</h3>
+        <p>{t('settings.discordRpc.desc')}</p>
       </div>
-      <button class="switch" class:on={discordRpc} onclick={() => setDiscordRpc(!discordRpc)} role="switch" aria-checked={discordRpc} aria-label="Discord Rich Presence">
+      <button class="switch" class:on={discordRpc} onclick={() => setDiscordRpc(!discordRpc)} role="switch" aria-checked={discordRpc} aria-label={t('settings.discordRpc')}>
         <span class="knob"></span>
       </button>
     </div>
@@ -382,7 +394,7 @@
     color: var(--text-2);
     padding: 2px 0 10px;
   }
-  .hk-hint strong {
+  .hk-hint :global(strong) {
     color: var(--text-1);
     font-weight: 600;
   }

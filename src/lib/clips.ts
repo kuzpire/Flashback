@@ -1,3 +1,5 @@
+import { t, localeTag } from './i18n.svelte';
+
 export type Clip = {
   id: string;
   title: string;
@@ -39,35 +41,45 @@ export function formatSize(bytes: number): string {
 
 export function formatRelative(date: Date): string {
   const min = Math.round((Date.now() - date.getTime()) / 60_000);
-  if (min < 1) return 'Ahora mismo';
-  if (min < 60) return `Hace ${min} min`;
+  if (min < 1) return t('time.now');
+  if (min < 60) return t('time.minAgo', { n: min });
   const h = Math.round(min / 60);
-  if (h === 1) return 'Hace una hora';
-  if (h < 24) return `Hace ${h} horas`;
+  if (h < 24) return t(h === 1 ? 'time.hourAgo' : 'time.hoursAgo', { n: h });
   const d = Math.round(h / 24);
-  if (d === 1) return 'Ayer';
-  return `Hace ${d} días`;
+  if (d === 1) return t('time.yesterday');
+  return t('time.daysAgo', { n: d });
 }
 
 function startOfDay(d: Date): number {
   return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
 }
 
-const MONTHS = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic'];
-
 export function dayLabel(date: Date): string {
   const today = startOfDay(new Date());
   const day = startOfDay(date);
   const diff = Math.round((today - day) / 86_400_000);
-  if (diff === 0) return 'Hoy';
-  if (diff === 1) return 'Ayer';
-  return `${date.getDate()} ${MONTHS[date.getMonth()]} ${date.getFullYear()}`;
+  if (diff === 0) return t('time.today');
+  if (diff === 1) return t('time.yesterday');
+  return date.toLocaleDateString(localeTag(), { day: 'numeric', month: 'short', year: 'numeric' });
 }
 
 // Las capturas de pantalla guardan el origen como "Pantalla N"; cualquier otro origen es un
 // juego. Es la misma convención con la que el backend rellena el `source` al capturar.
 export function isScreenSource(source: string): boolean {
-  return /^pantalla\b/i.test(source.trim());
+  return /^(?:pantalla|screen)\b/i.test(source.trim());
+}
+
+// El `source` de las pantallas se persiste canónico ("Pantalla N", el label del backend), pero se
+// muestra en el idioma activo. Localiza cada tramo (group.source puede unir varios con " · ");
+// los orígenes de juego pasan tal cual.
+export function displaySource(source: string): string {
+  return source
+    .split(' · ')
+    .map((part) => {
+      const m = part.trim().match(/^(?:pantalla|screen)\s+(\d+)$/i);
+      return m ? `${t('cap.screen')} ${m[1]}` : part;
+    })
+    .join(' · ');
 }
 
 export type LibraryFilter = { kind: 'edited' } | { kind: 'source'; value: string };

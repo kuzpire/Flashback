@@ -3,7 +3,7 @@
   import { invoke } from '@tauri-apps/api/core';
   import { revealItemInDir } from '@tauri-apps/plugin-opener';
   import { menu } from '$lib/menu.svelte';
-  import { formatDuration, formatRelative, type Clip } from '$lib/clips';
+  import { formatDuration, formatRelative, displaySource, type Clip } from '$lib/clips';
   import {
     isFavorite,
     toggleFavorite,
@@ -13,14 +13,13 @@
     removeFavorite
   } from '$lib/library.svelte';
   import { openEditor } from '$lib/editor.svelte';
+  import { t } from '$lib/i18n.svelte';
 
   let { clip }: { clip: Clip } = $props();
 
   const open = $derived(menu.openId === clip.id);
   const favorite = $derived(isFavorite(clip.id));
-  const favLabel = $derived(
-    favorite ? 'Marcado como favorito, click para desmarcar' : 'Marcar como favorito'
-  );
+  const favLabel = $derived(favorite ? t('card.favOn') : t('card.favOff'));
 
   let cardEl = $state<HTMLElement | null>(null);
   let poster = $state<string | null>(null);
@@ -177,7 +176,7 @@
 
   <div class="meta">
     <div class="info">
-      {#if clip.source}<span class="src label">{clip.source}</span>{/if}
+      {#if clip.source}<span class="src label">{displaySource(clip.source)}</span>{/if}
 
       {#if renaming}
         <input
@@ -200,10 +199,10 @@
     </div>
 
     <div class="actions">
-      <button class="act" aria-label="Compartir" onclick={(e) => e.stopPropagation()}><Icon name="share" size={19} sw={2} /></button>
+      <button class="act" aria-label={t('card.share')} onclick={(e) => e.stopPropagation()}><Icon name="share" size={19} sw={2} /></button>
       <button
         class="act"
-        aria-label="Más opciones"
+        aria-label={t('card.more')}
         aria-haspopup="menu"
         aria-expanded={open}
         onclick={toggleMenu}
@@ -213,11 +212,11 @@
 
       {#if open}
         <div class="menu" role="menu">
-          <button role="menuitem" onclick={(e) => { e.stopPropagation(); openEditor(clip); }}><Icon name="scissors" size={15} sw={1.9} /> Abrir en editor</button>
-          <button role="menuitem" onclick={startRename}><Icon name="rename" size={15} sw={1.9} /> Renombrar</button>
-          <button role="menuitem" onclick={openLocation}><Icon name="folder-open" size={15} sw={1.9} /> Abrir ubicación</button>
+          <button role="menuitem" onclick={(e) => { e.stopPropagation(); openEditor(clip); }}><Icon name="scissors" size={15} sw={1.9} /> {t('card.openEditor')}</button>
+          <button role="menuitem" onclick={startRename}><Icon name="rename" size={15} sw={1.9} /> {t('card.rename')}</button>
+          <button role="menuitem" onclick={openLocation}><Icon name="folder-open" size={15} sw={1.9} /> {t('card.openLocation')}</button>
           <div class="sep"></div>
-          <button role="menuitem" class="danger" onclick={deleteClip}><Icon name="trash" size={15} sw={1.9} /> Borrar</button>
+          <button role="menuitem" class="danger" onclick={deleteClip}><Icon name="trash" size={15} sw={1.9} /> {t('card.delete')}</button>
         </div>
       {/if}
     </div>

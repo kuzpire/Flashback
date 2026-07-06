@@ -1,9 +1,10 @@
 <script lang="ts">
   import Icon from '$lib/components/Icon.svelte';
   import ClipCard from '$lib/components/ClipCard.svelte';
-  import { groupClips } from '$lib/clips';
+  import { groupClips, displaySource } from '$lib/clips';
   import { library, refreshLibrary, isFavorite } from '$lib/library.svelte';
   import { clipOrder } from '$lib/editor.svelte';
+  import { t } from '$lib/i18n.svelte';
 
   $effect(() => {
     refreshLibrary();
@@ -20,14 +21,14 @@
 
 <div class="favs">
   <header class="head">
-    <h1>Tus Favoritos</h1>
+    <h1>{t('favs.title')}</h1>
   </header>
 
   {#if favs.length === 0}
     <div class="empty">
       <Icon name="bookmark" size={50} sw={1.3} />
-      <p>Aún no tienes clips guardados como favoritos.</p>
-      <span class="hint mono">Marca la estrella de un clip para guardarlo aquí.</span>
+      <p>{t('favs.empty')}</p>
+      <span class="hint mono">{t('favs.emptyHint')}</span>
     </div>
   {:else}
     {#each groups as group (group.label)}
@@ -35,7 +36,7 @@
         <div class="group-head">
           <span class="label">{group.label}</span>
           <span class="dash"></span>
-          {#if group.source}<span class="label src">{group.source}</span>{/if}
+          {#if group.source}<span class="label src">{displaySource(group.source)}</span>{/if}
         </div>
         <div class="grid">
           {#each group.clips as clip (clip.id)}

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { getCurrentWindow } from '@tauri-apps/api/window';
+  import { t } from '$lib/i18n.svelte';
 
   const appWindow = getCurrentWindow();
   let maximized = $state(false);
@@ -18,13 +19,13 @@
 </script>
 
 <div class="controls">
-  <button class="ctl" aria-label="Minimizar" onclick={() => appWindow.minimize()}>
+  <button class="ctl" aria-label={t('win.minimize')} onclick={() => appWindow.minimize()}>
     <svg viewBox="0 0 10 10" width="10" height="10"><path d="M1 5h8" /></svg>
   </button>
 
   <button
     class="ctl"
-    aria-label={maximized ? 'Restaurar' : 'Maximizar'}
+    aria-label={maximized ? t('win.restore') : t('win.maximize')}
     onclick={() => appWindow.toggleMaximize()}
   >
     {#if maximized}
@@ -37,7 +38,7 @@
     {/if}
   </button>
 
-  <button class="ctl close" aria-label="Cerrar" onclick={() => appWindow.close()}>
+  <button class="ctl close" aria-label={t('win.close')} onclick={() => appWindow.close()}>
     <svg viewBox="0 0 10 10" width="10" height="10"><path d="M1 1l8 8M9 1l-8 8" /></svg>
   </button>
 </div>

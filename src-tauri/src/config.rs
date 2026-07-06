@@ -199,6 +199,15 @@ pub fn set_discord_rpc(app: &tauri::AppHandle, on: bool) -> Result<(), String> {
     write_setting(app, "discord_rpc", serde_json::json!(on))
 }
 
+// Idioma de la interfaz: "en" por defecto. Lo lee también el backend (estados del RPC).
+pub fn get_language(app: &tauri::AppHandle) -> String {
+    read_setting(app, "language").unwrap_or_else(|| "en".into())
+}
+
+pub fn set_language(app: &tauri::AppHandle, lang: &str) -> Result<(), String> {
+    write_setting(app, "language", serde_json::json!(lang))
+}
+
 pub fn set_clips_dir(app: &tauri::AppHandle, dir: &str) -> Result<(), String> {
     let path = PathBuf::from(dir);
     std::fs::create_dir_all(&path).map_err(|e| format!("No se pudo crear la carpeta: {e}"))?;

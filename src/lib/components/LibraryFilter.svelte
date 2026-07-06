@@ -1,7 +1,8 @@
 <script lang="ts">
   import { invoke } from '@tauri-apps/api/core';
   import Icon from '$lib/components/Icon.svelte';
-  import { isScreenSource, sameFilter, type Clip, type LibraryFilter } from '$lib/clips';
+  import { isScreenSource, sameFilter, displaySource, type Clip, type LibraryFilter } from '$lib/clips';
+  import { t } from '$lib/i18n.svelte';
 
   let { clips, selected = $bindable() }: { clips: Clip[]; selected: LibraryFilter[] } = $props();
 
@@ -18,12 +19,12 @@
   const hasEdited = $derived(clips.some((c) => c.edited));
 
   const activeLabel = $derived.by(() => {
-    if (selected.length === 0) return 'Filtro';
+    if (selected.length === 0) return t('filter.label');
     if (selected.length === 1) {
       const f = selected[0];
-      return f.kind === 'edited' ? 'Editados' : f.value;
+      return f.kind === 'edited' ? t('filter.edited') : displaySource(f.value);
     }
-    return `${selected.length} filtros`;
+    return t('filter.count', { n: selected.length });
   });
   const isFiltered = $derived(selected.length > 0);
 
@@ -77,7 +78,7 @@
         class="clear"
         role="button"
         tabindex="0"
-        aria-label="Quitar filtro"
+        aria-label={t('filter.clear')}
         onclick={(e) => { e.stopPropagation(); clearAll(); }}
         onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); clearAll(); } }}
       >×</span>
@@ -90,21 +91,21 @@
     <div class="menu" role="menu">
       <button class="item" class:on={selected.length === 0} onclick={clearAll} role="menuitemradio" aria-checked={selected.length === 0}>
         <span class="lead"><Icon name="clips" size={15} /></span>
-        <span class="txt">Todos</span>
+        <span class="txt">{t('filter.all')}</span>
         <span class="chk"><Icon name="check" size={13} sw={2.2} /></span>
       </button>
 
       {#if hasEdited}
         <button class="item" class:on={isOn({ kind: 'edited' })} onclick={() => toggle({ kind: 'edited' })} role="menuitemcheckbox" aria-checked={isOn({ kind: 'edited' })}>
           <span class="lead"><Icon name="edit" size={15} /></span>
-          <span class="txt">Editados</span>
+          <span class="txt">{t('filter.edited')}</span>
           <span class="chk"><Icon name="check" size={13} sw={2.2} /></span>
         </button>
       {/if}
 
       {#if games.length}
         <div class="divider"></div>
-        <div class="sep">Juegos</div>
+        <div class="sep">{t('filter.games')}</div>
         {#each games as g (g)}
           <button class="item" class:on={isOn({ kind: 'source', value: g })} onclick={() => toggle({ kind: 'source', value: g })} role="menuitemcheckbox" aria-checked={isOn({ kind: 'source', value: g })}>
             <span class="lead logo">
@@ -118,11 +119,11 @@
 
       {#if screens.length}
         <div class="divider"></div>
-        <div class="sep">Pantallas</div>
+        <div class="sep">{t('filter.screens')}</div>
         {#each screens as s (s)}
           <button class="item" class:on={isOn({ kind: 'source', value: s })} onclick={() => toggle({ kind: 'source', value: s })} role="menuitemcheckbox" aria-checked={isOn({ kind: 'source', value: s })}>
             <span class="lead"><Icon name="monitor" size={15} /></span>
-            <span class="txt">{s}</span>
+            <span class="txt">{displaySource(s)}</span>
             <span class="chk"><Icon name="check" size={13} sw={2.2} /></span>
           </button>
         {/each}

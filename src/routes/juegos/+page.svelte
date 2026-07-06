@@ -2,6 +2,7 @@
   import { invoke } from '@tauri-apps/api/core';
   import Icon from '$lib/components/Icon.svelte';
   import { type SeenGame, gameSettings, loadDisabledGames, toggleGameDisabled, fetchSeenGames } from '$lib/games.svelte';
+  import { t } from '$lib/i18n.svelte';
 
   type Detected = { name: string; steam_appid: number | null };
 
@@ -16,15 +17,22 @@
 
   function lastSeenLabel(ts: number): string {
     const diff = Math.floor(Date.now() / 1000 - ts);
-    if (diff < 60) return 'Hace un momento';
-    if (diff < 3600) return `Hace ${Math.floor(diff / 60)} min`;
-    if (diff < 86400) return `Hace ${Math.floor(diff / 3600)} h`;
+    if (diff < 60) return t('time.moment');
+    if (diff < 3600) return t('time.minAgo', { n: Math.floor(diff / 60) });
+    if (diff < 86400) return t('time.hAgo', { n: Math.floor(diff / 3600) });
     const days = Math.floor(diff / 86400);
-    if (days === 1) return 'Ayer';
-    if (days < 7) return `Hace ${days} días`;
-    if (days < 30) return `Hace ${Math.floor(days / 7)} semana${Math.floor(days / 7) > 1 ? 's' : ''}`;
-    if (days < 365) return `Hace ${Math.floor(days / 30)} mes${Math.floor(days / 30) > 1 ? 'es' : ''}`;
-    return `Hace ${Math.floor(days / 365)} año${Math.floor(days / 365) > 1 ? 's' : ''}`;
+    if (days === 1) return t('time.yesterday');
+    if (days < 7) return t('time.daysAgo', { n: days });
+    if (days < 30) {
+      const w = Math.floor(days / 7);
+      return t(w > 1 ? 'time.weeksAgo' : 'time.weekAgo', { n: w });
+    }
+    if (days < 365) {
+      const m = Math.floor(days / 30);
+      return t(m > 1 ? 'time.monthsAgo' : 'time.monthAgo', { n: m });
+    }
+    const y = Math.floor(days / 365);
+    return t(y > 1 ? 'time.yearsAgo' : 'time.yearAgo', { n: y });
   }
 
   function logoKey(name: string, steam_appid: number | null): string {
@@ -64,13 +72,13 @@
 
 <div class="games">
   <header class="head">
-    <h1>Juegos detectados</h1>
+    <h1>{t('games.title')}</h1>
   </header>
 
   {#if currentGame}
     <section class="game-group">
       <div class="game-group-head">
-        <span class="label">Ahora mismo</span>
+        <span class="label">{t('games.now')}</span>
         <span class="dash"></span>
       </div>
       <div class="game-list">
@@ -84,17 +92,17 @@
           </span>
           <div class="game-info">
             <span class="game-name">{currentGame.name}</span>
-            <span class="game-path">{gameSettings.isDisabled(currentGame.name) ? 'Captura deshabilitada' : 'Capturando clips'}</span>
+            <span class="game-path">{gameSettings.isDisabled(currentGame.name) ? t('games.captureDisabled') : t('games.capturingClips')}</span>
           </div>
           <div class="cap-toggle">
-            <span class="cap-toggle-label">Capturar</span>
+            <span class="cap-toggle-label">{t('games.capture')}</span>
             <button
               class="switch"
               class:on={!gameSettings.isDisabled(currentGame.name)}
               onclick={() => toggleGameDisabled(currentGame!.name)}
               role="switch"
               aria-checked={!gameSettings.isDisabled(currentGame.name)}
-              aria-label={`Capturar ${currentGame.name}`}
+              aria-label={t('games.captureAria', { name: currentGame.name })}
             >
               <span class="knob"></span>
             </button>
@@ -107,7 +115,7 @@
   {#if otherGames.length > 0}
     <section class="game-group">
       <div class="game-group-head">
-        <span class="label">Juegos Recientes</span>
+        <span class="label">{t('games.recent')}</span>
         <span class="dash"></span>
       </div>
       <div class="game-list">
@@ -123,18 +131,18 @@
               <span class="game-name">{g.name}</span>
               <span class="game-sub">
                 <span class="game-path sub-primary">{lastSeenLabel(g.last_seen)}</span>
-                <span class="game-path mono sub-secondary">{disabled ? 'Captura deshabilitada' : 'Captura activa'}</span>
+                <span class="game-path mono sub-secondary">{disabled ? t('games.captureDisabled') : t('games.captureActive')}</span>
               </span>
             </div>
             <div class="cap-toggle">
-              <span class="cap-toggle-label">Capturar</span>
+              <span class="cap-toggle-label">{t('games.capture')}</span>
               <button
                 class="switch"
                 class:on={!disabled}
                 onclick={() => toggleGameDisabled(g.name)}
                 role="switch"
                 aria-checked={!disabled}
-                aria-label={`Capturar ${g.name}`}
+                aria-label={t('games.captureAria', { name: g.name })}
               >
                 <span class="knob"></span>
               </button>
@@ -148,8 +156,8 @@
   {#if !currentGame && otherGames.length === 0}
     <div class="empty">
       <Icon name="gamepad" size={46} sw={1.3} />
-      <p>Aún no has abierto ningún juego con Flashback activo.</p>
-      <span class="hint mono">Los juegos aparecen aquí la primera vez que los detectamos.</span>
+      <p>{t('games.emptyTitle')}</p>
+      <span class="hint mono">{t('games.emptyHint')}</span>
     </div>
   {/if}
 </div>

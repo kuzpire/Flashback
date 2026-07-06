@@ -18,6 +18,7 @@
     type Segment,
   } from '$lib/editor.svelte';
   import { formatSize } from '$lib/clips';
+  import { t, localeTag } from '$lib/i18n.svelte';
   import { refreshLibrary } from '$lib/library.svelte';
   import { revealItemInDir } from '@tauri-apps/plugin-opener';
   import { convertFileSrc } from '@tauri-apps/api/core';
@@ -724,9 +725,9 @@
       } catch (err) {
         console.error('clipboard', err);
       }
-      setNotice(copied ? `Captura copiada y guardada: ${name}` : `Captura guardada: ${name}`, 4000);
+      setNotice(copied ? t('ed.shotCopied', { name: name ?? '' }) : t('ed.shotSaved', { name: name ?? '' }), 4000);
     } catch (e) {
-      setNotice(`Error al capturar: ${e}`, 5000);
+      setNotice(t('ed.shotError', { e: String(e) }), 5000);
       console.error('capture', e);
     }
   }
@@ -736,10 +737,10 @@
       const dst = await exportClip();
       if (dst) {
         await refreshLibrary();
-        setNotice(`Exportado: ${dst.split(/[/\\]/).pop()}`, 4000);
+        setNotice(t('ed.exported', { name: dst.split(/[/\\]/).pop() ?? '' }), 4000);
       }
     } catch (e) {
-      setNotice(`Error al exportar: ${e}`, 6000);
+      setNotice(t('ed.exportError', { e: String(e) }), 6000);
       console.error('export', e);
     }
   }
@@ -840,7 +841,7 @@
   function fmtDate(d?: Date): string {
     if (!d) return '';
     try {
-      return d.toLocaleDateString('es-ES', { day: 'numeric', month: 'short', year: 'numeric' });
+      return d.toLocaleDateString(localeTag(), { day: 'numeric', month: 'short', year: 'numeric' });
     } catch {
       return '';
     }
@@ -868,21 +869,21 @@
   <div class="sub-bar mono">
     <div class="sub-left">
       <div class="sub-chevrons">
-        <button class="sub-btn" aria-label="Clip anterior" disabled={!hasPrev || editorState.exporting} onclick={() => navigateClip(-1)}>
+        <button class="sub-btn" aria-label={t('ed.prevClip')} disabled={!hasPrev || editorState.exporting} onclick={() => navigateClip(-1)}>
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" fill="currentColor"><path d="M 896 511.62C 896 531.17 882.83 547.9 864.24 552.88Q 859.03 554.27 847.09 554.27Q 331.65 554.25 274.29 554.25A 0.28 0.27 67.3 0 0 274.1 554.72Q 291.29 571.91 373.18 653.82C 375.44 656.08 378.29 660.47 379.72 663.6Q 388.28 682.4 379.81 700.58C 369.12 723.55 340.54 731.79 318.84 718.64Q 314.43 715.97 304.94 706.35Q 296.52 697.84 140.32 541.69C 132.48 533.85 128 522.66 128 511.61C 128 500.57 132.48 489.38 140.32 481.54Q 296.52 325.39 304.94 316.88Q 314.43 307.26 318.84 304.59C 340.54 291.44 369.12 299.68 379.81 322.65Q 388.28 340.83 379.72 359.63C 378.29 362.76 375.44 367.15 373.18 369.41Q 291.29 451.32 274.1 468.51A 0.28 0.27 -67.3 0 0 274.29 468.98Q 331.65 468.98 847.09 468.96Q 859.03 468.96 864.24 470.35C 882.83 475.33 896 492.06 896 511.62Z"/></svg>
         </button>
-        <button class="sub-btn" aria-label="Clip siguiente" disabled={!hasNext || editorState.exporting} onclick={() => navigateClip(1)}>
+        <button class="sub-btn" aria-label={t('ed.nextClip')} disabled={!hasNext || editorState.exporting} onclick={() => navigateClip(1)}>
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" fill="currentColor"><path d="M 896 511.62C 896 520.05 893.43 528.39 888.82 535.4Q 886.22 539.36 879.43 545.94Q 878.49 546.85 719.95 705.45Q 708.63 716.76 704.04 719.33Q 694.05 724.92 682.46 724.88C 649.56 724.77 629.55 689.32 645.73 660.83Q 648.57 655.83 656.42 648.13Q 665.07 639.64 749.89 554.71A 0.26 0.26 22.15 0 0 749.7 554.27Q 188.43 554.23 177.34 554.3Q 165.13 554.38 159.82 552.91C 141.08 547.71 128 531.28 128 511.61C 128 491.95 141.08 475.52 159.82 470.32Q 165.13 468.85 177.34 468.93Q 188.43 469 749.7 468.96A 0.26 0.26 -22.15 0 0 749.89 468.52Q 665.07 383.59 656.42 375.1Q 648.57 367.4 645.73 362.4C 629.55 333.91 649.56 298.46 682.46 298.35Q 694.05 298.31 704.04 303.9Q 708.63 306.47 719.95 317.78Q 878.49 476.38 879.43 477.29Q 886.22 483.87 888.82 487.83C 893.43 494.84 896 503.18 896 511.62Z"/></svg>
         </button>
       </div>
       <span class="sub-sep">|</span>
-      <span class="sub-label">Creado:</span>
+      <span class="sub-label">{t('ed.created')}</span>
       <span class="sub-info">{fmtDate(editorState.clip?.createdAt)}</span>
       <span class="sub-sep">|</span>
-      <span class="sub-label">Tamaño:</span>
+      <span class="sub-label">{t('ed.size')}</span>
       <span class="sub-info">{formatSize(editorState.clip?.sizeBytes ?? 0)}</span>
       <span class="sub-sep">|</span>
-      <span class="sub-label">Ruta:</span>
+      <span class="sub-label">{t('ed.path')}</span>
       <button
         class="sub-path"
         onclick={openLocation}
@@ -891,8 +892,8 @@
       >{shortPath(editorState.clip?.path ?? '')}</button>
     </div>
     <div class="sub-right">
-      <button class="sub-reset" onclick={resetTrim}>Reestablecer</button>
-      <button class="sub-close" aria-label="Cerrar editor" onclick={close}>✕</button>
+      <button class="sub-reset" onclick={resetTrim}>{t('ed.reset')}</button>
+      <button class="sub-close" aria-label={t('ed.closeEditor')} onclick={close}>✕</button>
     </div>
   </div>
 
@@ -917,15 +918,15 @@
     {/if}
 
     {#if editorState.loading}
-      <div class="prep mono">Preparando pistas de audio…</div>
+      <div class="prep mono">{t('ed.preparingAudio')}</div>
     {:else if editorState.error}
-      <div class="prep mono err">No se pudieron separar las pistas: {editorState.error}</div>
+      <div class="prep mono err">{t('ed.trackSplitError', { error: String(editorState.error) })}</div>
     {/if}
   </div>
 
   <div class="dock" bind:this={dockEl} style:height={dockH !== null ? `${dockH}px` : null}>
     <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="dock-grip" onmousedown={onDockGripDown} title="Arrastrar para redimensionar"></div>
+    <div class="dock-grip" onmousedown={onDockGripDown} title={t('ed.dragResize')}></div>
     <div class="transport">
       <div class="tp-left">
         <span class="tp-time mono">
@@ -936,35 +937,35 @@
       </div>
 
       <div class="tp-center">
-        <button class="tp-btn" aria-label="Capturar fotograma" onclick={screenshot}>
+        <button class="tp-btn" aria-label={t('ed.captureFrame')} onclick={screenshot}>
           <Icon name="camera" size={18} />
         </button>
-        <button class="tp-btn" aria-label="Ir al inicio" onclick={() => seekOutput(0)}>
+        <button class="tp-btn" aria-label={t('ed.goStart')} onclick={() => seekOutput(0)}>
           <Icon name="skip-back" size={20} />
         </button>
-        <button class="tp-btn" aria-label="Fotograma anterior" onclick={() => stepFrame(-1)}>
+        <button class="tp-btn" aria-label={t('ed.prevFrame')} onclick={() => stepFrame(-1)}>
           <Icon name="step-back" size={20} />
         </button>
-        <button class="tp-play" aria-label={playing ? 'Pausar' : 'Reproducir'} onclick={toggle}>
+        <button class="tp-play" aria-label={playing ? t('ed.pause') : t('ed.play')} onclick={toggle}>
           <Icon name={playing ? 'stop' : 'play'} size={19} />
         </button>
-        <button class="tp-btn" aria-label="Fotograma siguiente" onclick={() => stepFrame(1)}>
+        <button class="tp-btn" aria-label={t('ed.nextFrame')} onclick={() => stepFrame(1)}>
           <Icon name="step-fwd" size={20} />
         </button>
-        <button class="tp-btn" aria-label="Ir al final" onclick={() => seekOutput(kept)}>
+        <button class="tp-btn" aria-label={t('ed.goEnd')} onclick={() => seekOutput(kept)}>
           <Icon name="skip-fwd" size={20} />
         </button>
-        <button class="tp-btn" aria-label="Pantalla completa (F)" onclick={toggleFullscreen}>
+        <button class="tp-btn" aria-label={t('ed.fullscreen')} onclick={toggleFullscreen}>
           <Icon name="maximize" size={18} />
         </button>
       </div>
 
       <div class="tp-right">
         <button class="act" disabled={editorState.segments.length <= 1} onclick={removeActive}>
-          <Icon name="trash" size={14} /> Quitar
+          <Icon name="trash" size={14} /> {t('ed.remove')}
         </button>
         <button class="act export" onclick={handleExport} disabled={editorState.exporting}>
-          {editorState.exporting ? 'Exportando…' : 'Exportar'}
+          {editorState.exporting ? t('ed.exporting') : t('ed.export')}
           <Icon name="export" size={16} />
         </button>
       </div>
@@ -1028,7 +1029,7 @@
             <button
               class="fader-ico"
               class:on={muted}
-              aria-label={muted ? `Activar ${label}` : `Silenciar ${label}`}
+              aria-label={muted ? t('ed.unmute', { label }) : t('ed.mute', { label })}
               aria-pressed={muted}
               onclick={() => toggleMute(chan)}
             ><Icon name={icon} size={22} /></button>
@@ -1039,9 +1040,9 @@
           <div class="faders">
             {#if !editorState.loading}
               {#if editorState.mic}
-                {@render fader('mic', editorState.mixer.mic_vol, editorState.mixer.mic_muted, 'Audio del micrófono', 'mic')}
+                {@render fader('mic', editorState.mixer.mic_vol, editorState.mixer.mic_muted, t('ed.micAudio'), 'mic')}
               {/if}
-              {@render fader('sys', editorState.mixer.sys_vol, editorState.mixer.sys_muted, editorState.system ? 'Audio del sistema' : 'Audio', editorState.system ? 'headphones' : 'speaker')}
+              {@render fader('sys', editorState.mixer.sys_vol, editorState.mixer.sys_muted, editorState.system ? t('ed.sysAudio') : t('ed.audio'), editorState.system ? 'headphones' : 'speaker')}
             {/if}
           </div>
         </div>
@@ -1053,7 +1054,7 @@
                   <canvas bind:this={sysCanvas}></canvas>
                 {:else}
                   <canvas bind:this={mixCanvas}></canvas>
-                  {#if !editorState.mixPeaks}<span class="wf-note mono">Sin audio</span>{/if}
+                  {#if !editorState.mixPeaks}<span class="wf-note mono">{t('ed.noAudio')}</span>{/if}
                 {/if}
               </div>
             </div>
@@ -1098,16 +1099,16 @@
     ></div>
     <div class="ctx-menu" style="left: {blockMenu.x}px; top: {blockMenu.y}px;">
       <button class="ctx-item" onclick={toggleDisableBlock}>
-        {editorState.segments[blockMenu.index]?.disabled ? 'Activar' : 'Desactivar'}
+        {editorState.segments[blockMenu.index]?.disabled ? t('ed.enable') : t('ed.disable')}
       </button>
-      <button class="ctx-item danger" onclick={deleteBlock} disabled={editorState.segments.length <= 1}>Eliminar</button>
+      <button class="ctx-item danger" onclick={deleteBlock} disabled={editorState.segments.length <= 1}>{t('ed.deleteBlock')}</button>
     </div>
   {/if}
 
   {#if editorState.exporting}
     <div class="export-backdrop">
       <div class="export-card">
-        <div class="export-title">Exportando clip…</div>
+        <div class="export-title">{t('ed.exportingClip')}</div>
         <div class="export-bar">
           <div class="export-fill" style="width: {Math.max(2, Math.round(editorState.exportProgress * 100))}%"></div>
         </div>

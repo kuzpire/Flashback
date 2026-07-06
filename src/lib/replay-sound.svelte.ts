@@ -1,11 +1,13 @@
+import { t } from './i18n.svelte';
+
 const LEVEL_KEY = 'flashback.replay.soundLevel';
 
 export type SoundLevel = 'low' | 'normal' | 'high';
 
-export const SOUND_OPTIONS: { key: SoundLevel; label: string; gain: number }[] = [
-  { key: 'low', label: 'Bajo', gain: 0.25 },
-  { key: 'normal', label: 'Normal', gain: 0.55 },
-  { key: 'high', label: 'Alto', gain: 1.0 }
+export const SOUND_OPTIONS: { key: SoundLevel; gain: number }[] = [
+  { key: 'low', gain: 0.25 },
+  { key: 'normal', gain: 0.55 },
+  { key: 'high', gain: 1.0 }
 ];
 
 function loadLevel(): SoundLevel {
@@ -32,7 +34,7 @@ export function gainFor(level: SoundLevel): number {
 }
 
 export function soundLabel(level: SoundLevel): string {
-  return SOUND_OPTIONS.find((o) => o.key === level)?.label ?? 'Normal';
+  return t(`sound.${level}`);
 }
 
 // Un único elemento reutilizado: evita crear un Audio por cada reproducción. Suena aunque

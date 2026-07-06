@@ -28,12 +28,16 @@
     type QualityKey
   } from '$lib/capture-config.svelte';
   import { gameSettings, loadDisabledGames } from '$lib/games.svelte';
+  import { displaySource } from '$lib/clips';
+  import { t, initLocale } from '$lib/i18n.svelte';
 
   let { children } = $props();
 
+  initLocale();
+
   const nav = [
-    { href: '/', icon: 'clips-fill', label: 'Clips' },
-    { href: '/favoritos', icon: 'bookmark-fill', label: 'Favoritos' }
+    { href: '/', icon: 'clips-fill', labelKey: 'nav.clips' },
+    { href: '/favoritos', icon: 'bookmark-fill', labelKey: 'nav.favorites' }
   ];
 
   const isActive = (href: string) =>
@@ -76,25 +80,25 @@
   const settingRows = $derived<QRow[]>([
     {
       key: 'tiempo',
-      title: 'Duración',
+      title: t('cap.duration'),
       value: secondsLabel(replay.seconds),
       options: BUFFER_OPTIONS.map((o) => ({ label: o.label, raw: o.seconds }))
     },
     {
       key: 'calidad',
-      title: 'Calidad',
+      title: t('cap.quality'),
       value: qualityLabel(captureConfig.quality),
-      options: QUALITY_OPTIONS.map((q) => ({ label: q.label, raw: q.key }))
+      options: QUALITY_OPTIONS.map((q) => ({ label: qualityLabel(q.key), raw: q.key }))
     },
     {
       key: 'resolucion',
-      title: 'Resolución',
+      title: t('cap.resolution'),
       value: resolutionLabel(captureConfig.resolution),
       options: RES_OPTIONS.map((r) => ({ label: r.label, raw: r.height }))
     },
     {
       key: 'fps',
-      title: 'FPS',
+      title: t('cap.fps'),
       value: `${captureConfig.fps} FPS`,
       options: FPS_OPTIONS.map((f) => ({ label: `${f} FPS`, raw: f }))
     }
@@ -132,7 +136,7 @@
   }
 
   const activeMonitor = $derived(monitors.find((m) => m.id === selectedMonitor) ?? null);
-  const micName = $derived(audioInputs.find((d) => d.id === micInput)?.name ?? 'Sin micrófonos');
+  const micName = $derived(audioInputs.find((d) => d.id === micInput)?.name ?? t('cap.noMicsShort'));
 
   async function loadMonitors() {
     try {
@@ -212,7 +216,7 @@
     if (recording) return;
     const target = captureTarget;
     if (!target) {
-      toast('Selecciona una pantalla para grabar, o abre un juego para el modo Aplicación.');
+      toast(t('toast.selectScreen'));
       return;
     }
     try {
@@ -226,9 +230,9 @@
         micDevice: micInput
       });
       recording = true;
-      toast('Grabando', 'ready');
+      toast(t('toast.recording'), 'ready');
     } catch (e) {
-      toast(`No se pudo iniciar la grabación: ${e}`, 'error');
+      toast(t('toast.startFailed', { e: String(e) }), 'error');
       console.error('start_capture', e);
     }
   }
@@ -239,13 +243,13 @@
     try {
       const path = await invoke<string | null>('stop_capture');
       if (path) {
-        toast('Clip guardado', 'saved');
+        toast(t('toast.clipSaved'), 'saved');
         await refreshLibrary();
       } else {
-        toast('Grabación detenida', 'info');
+        toast(t('toast.recStopped'), 'info');
       }
     } catch (e) {
-      toast(`Error al detener la grabación: ${e}`, 'error');
+      toast(t('toast.stopFailed', { e: String(e) }), 'error');
       console.error('stop_capture', e);
     }
   }
@@ -261,11 +265,11 @@
 
   async function saveReplay() {
     if (!replay.enabled) {
-      toast('Activa "Replay en segundo plano" en Ajustes para guardar.');
+      toast(t('toast.enableReplay'));
       return;
     }
     if (!captureTarget) {
-      toast('Sin objetivo: selecciona una pantalla o abre un juego para que el replay grabe.');
+      toast(t('toast.noTargetReplay'));
       return;
     }
     try {
@@ -273,13 +277,13 @@
       const path = await invoke<string | null>('save_replay', { source });
       if (path) {
         playReplaySound();
-        toast('Clip guardado', 'saved');
+        toast(t('toast.clipSaved'), 'saved');
         await refreshLibrary();
       } else {
-        toast('No se pudo guardar el replay (el buffer aún no tiene un keyframe).');
+        toast(t('toast.replaySaveFailed'));
       }
     } catch (e) {
-      toast(`Error al guardar el replay: ${e}`, 'error');
+      toast(t('toast.replaySaveError', { e: String(e) }), 'error');
       console.error('save_replay', e);
     }
   }
@@ -363,9 +367,9 @@
       // ya la tiene otra app, y antes ese fallo (dentro de un try común) abortaba el registro de
       // los siguientes, tumbando los tres atajos. Aislado, un conflicto solo pierde ese atajo.
       const binds: { accel: string; name: string; run: () => void }[] = [
-        { accel: sr, name: 'guardar clip', run: saveReplay },
-        { accel: rec, name: 'grabación', run: toggleRecording },
-        { accel: op, name: 'abrir Flashback', run: openFlashback }
+        { accel: sr, name: t('hk.name.saveClip'), run: saveReplay },
+        { accel: rec, name: t('hk.name.recording'), run: toggleRecording },
+        { accel: op, name: t('hk.name.openFlashback'), run: openFlashback }
       ];
       const failed: string[] = [];
       for (const b of binds) {
@@ -380,7 +384,7 @@
         }
       }
       if (!cancelled && failed.length) {
-        toast(`Atajo en uso por otra app: ${failed.join(', ')}. Cámbialo en Ajustes.`, 'error');
+        toast(t('toast.hotkeyInUse', { failed: failed.join(', ') }), 'error');
       }
     })();
     return () => {
@@ -413,10 +417,10 @@
         await invoke('stop_replay');
         if (key !== 'off') {
           await invoke('start_replay', { target, seconds, fps, quality, resolution, bitrate, mic, micDevice });
-          if (wasOff) toast('Listo para clipear', 'ready');
+          if (wasOff) toast(t('toast.replayReady'), 'ready');
         }
       } catch (e) {
-        toast(`No se pudo iniciar el replay: ${e}`, 'error');
+        toast(t('toast.replayStartFailed', { e: String(e) }), 'error');
         console.error('replay', e);
       }
     })();
@@ -437,7 +441,7 @@
           class="nav-item"
           class:active={isActive(item.href)}
           href={item.href}
-          aria-label={item.label}
+          aria-label={t(item.labelKey)}
         >
           <Icon name={item.icon} size={24} />
         </a>
@@ -448,7 +452,7 @@
       class="nav-item games-tab"
       class:active={isActive('/juegos')}
       href="/juegos"
-      aria-label="Juegos"
+      aria-label={t('nav.games')}
     >
       <Icon name="gamepad" size={24} />
     </a>
@@ -456,7 +460,7 @@
       class="nav-item settings-tab"
       class:active={isActive('/settings')}
       href="/settings"
-      aria-label="Ajustes"
+      aria-label={t('nav.settings')}
     >
       <Icon name="settings-fill" size={24} />
     </a>
@@ -480,7 +484,7 @@
               <Icon name="scissors" size={20} />
             </span>
             <span class="cap-text">
-              <span class="cap-label">En el editor</span>
+              <span class="cap-label">{t('cap.inEditor')}</span>
               <span class="cap-proc"><span class="marq-main">{editorState.clip.title}</span></span>
             </span>
           {:else if selectedMonitor}
@@ -497,15 +501,15 @@
             <span class="cap-text">
               <span class="cap-label">
                 {#if selectedMonitor}
-                  {recording ? 'Grabando pantalla' : 'Pantalla lista'}
+                  {recording ? t('cap.recordingScreen') : t('cap.screenReady')}
                 {:else if game && gameDisabled}
-                  Captura deshabilitada
+                  {t('cap.captureDisabled')}
                 {:else}
-                  {game ? 'Capturando clips' : 'En espera'}
+                  {game ? t('cap.capturingClips') : t('cap.idle')}
                 {/if}
               </span>
               <span class="cap-proc">
-                {selectedMonitor ? (activeMonitor?.label ?? 'Pantalla') : game || 'Sin juego'}
+                {selectedMonitor ? (activeMonitor?.label ? displaySource(activeMonitor.label) : t('cap.screen')) : game || t('cap.noGame')}
               </span>
             </span>
           {/if}
@@ -516,8 +520,8 @@
             <button class="cap-opt" class:on={!selectedMonitor} role="menuitem" onclick={(e) => backToApp(e)}>
               <span class="opt-ico"><Icon name="gamepad" size={21} /></span>
               <span class="opt-text">
-                <span class="opt-title">Aplicación</span>
-                <span class="opt-sub">{game || 'Sin juego'}</span>
+                <span class="opt-title">{t('cap.application')}</span>
+                <span class="opt-sub">{game || t('cap.noGame')}</span>
               </span>
               {#if !selectedMonitor}<span class="opt-check"><Icon name="check" size={15} sw={2.2} /></span>{/if}
             </button>
@@ -534,13 +538,10 @@
             >
               <span class="opt-ico"><Icon name="mic" size={21} /></span>
               <span class="mic-label">
-                Capturar audio del micrófono
-                <span class="help" aria-label="Qué hace esta opción">
+                {t('cap.micCapture')}
+                <span class="help" aria-label={t('cap.whatOption')}>
                   ?
-                  <span class="help-tip" role="tooltip">
-                    Si está activo, graba también tu voz desde el micrófono elegido, mezclada con
-                    el audio del clip.
-                  </span>
+                  <span class="help-tip" role="tooltip">{t('cap.micTip')}</span>
                 </span>
               </span>
               <span class="mic-switch"><span class="mic-knob"></span></span>
@@ -552,7 +553,7 @@
                   class="mic-trigger"
                   aria-haspopup="listbox"
                   aria-expanded={micDDOpen}
-                  aria-label="Entrada de micrófono"
+                  aria-label={t('cap.micInput')}
                   onclick={toggleMicDD}
                 >
                   <span class="mic-value">{micName}</span>
@@ -573,7 +574,7 @@
                       </button>
                     {/each}
                     {#if audioInputs.length === 0}
-                      <button class="mic-item" disabled>Sin micrófonos detectados</button>
+                      <button class="mic-item" disabled>{t('cap.noMics')}</button>
                     {/if}
                   </div>
                 {/if}
@@ -581,7 +582,7 @@
             </div>
 
             <div class="cap-sep"></div>
-            <span class="cap-group">Pantallas</span>
+            <span class="cap-group">{t('cap.screens')}</span>
 
             <div class="screen-grid">
               {#each monitors as m (m.id)}
@@ -658,14 +659,11 @@
               {/each}
 
               <div class="qest">
-                <span class="qest-label">Tamaño estimado del clip:</span>
+                <span class="qest-label">{t('cap.estSize')}</span>
                 <span class="qest-right">
-                  <span class="help" aria-label="Sobre el tamaño estimado">
+                  <span class="help" aria-label={t('cap.aboutEstSize')}>
                     ?
-                    <span class="help-tip" role="tooltip">
-                      El tamaño es aproximado: el bitrate es variable y el peso real depende de
-                      lo movida que sea la escena.
-                    </span>
+                    <span class="help-tip" role="tooltip">{t('cap.estSizeTip')}</span>
                   </span>
                   <span class="qest-val mono">{estSize}</span>
                 </span>
@@ -678,10 +676,10 @@
           <span class="pill combo recpill mono" class:on={recording}>
             <button class="seg rec-seg" onclick={toggleRecording}>
               <span class="rec-ico"><Icon name={recording ? 'stop' : 'play'} size={15} /></span>
-              <span class="rec-label">{recording ? 'Detener grabación' : 'Iniciar grabación'}</span>
+              <span class="rec-label">{recording ? t('cap.stopRec') : t('cap.startRec')}</span>
             </button>
             <span class="sep">|</span>
-            <button class="seg rec-hotkey" title="Editar atajo de grabación" onclick={editHotkey}>
+            <button class="seg rec-hotkey" title={t('cap.editRecHotkey')} onclick={editHotkey}>
               {labelFor(hotkeys.record)}
             </button>
           </span>

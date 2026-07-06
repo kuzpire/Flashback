@@ -1,3 +1,5 @@
+import { t } from './i18n.svelte';
+
 const FPS_KEY = 'flashback.capture.fps';
 const QUALITY_KEY = 'flashback.capture.quality';
 const RESOLUTION_KEY = 'flashback.capture.resolution';
@@ -11,12 +13,12 @@ export type QualityKey = 'low' | 'normal' | 'high' | 'veryhigh' | 'ultra';
 // Escalera de calidad alineada con SteelSeries Moments (1080p60): Bajo ≈ 19, Medio ≈ 34,
 // Alto ≈ 50, Muy alta ≈ 90, Ultra ≈ 130 Mbps. El bitrate real lo calcula el backend
 // (ancho·alto·fps·factor), así escala con la resolución y los fps.
-export const QUALITY_OPTIONS: { key: QualityKey; label: string }[] = [
-  { key: 'low', label: 'Bajo' },
-  { key: 'normal', label: 'Medio' },
-  { key: 'high', label: 'Alto' },
-  { key: 'veryhigh', label: 'Muy alta' },
-  { key: 'ultra', label: 'Ultra' }
+export const QUALITY_OPTIONS: { key: QualityKey }[] = [
+  { key: 'low' },
+  { key: 'normal' },
+  { key: 'high' },
+  { key: 'veryhigh' },
+  { key: 'ultra' }
 ];
 
 // Alto objetivo del clip. El backend captura a nativo y escala a este alto (manteniendo
@@ -74,7 +76,7 @@ export const captureConfig = $state<{
 });
 
 export function qualityLabel(key: QualityKey): string {
-  return QUALITY_OPTIONS.find((o) => o.key === key)?.label ?? key;
+  return t(`quality.${key}`);
 }
 
 export function resolutionLabel(height: number): string {

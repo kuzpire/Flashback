@@ -83,6 +83,16 @@ fn set_discord_rpc(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn get_language(app: tauri::AppHandle) -> String {
+    config::get_language(&app)
+}
+
+#[tauri::command]
+fn set_language(app: tauri::AppHandle, lang: String) -> Result<(), String> {
+    config::set_language(&app, &lang)
+}
+
+#[tauri::command]
 fn start_capture(
     app: tauri::AppHandle,
     target: String,
@@ -459,6 +469,8 @@ pub fn run() {
             set_encoder,
             get_discord_rpc,
             set_discord_rpc,
+            get_language,
+            set_language,
             list_monitors,
             list_audio_inputs,
             start_capture,

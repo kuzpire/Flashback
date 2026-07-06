@@ -2,9 +2,10 @@
   import Icon from '$lib/components/Icon.svelte';
   import ClipCard from '$lib/components/ClipCard.svelte';
   import LibraryFilter from '$lib/components/LibraryFilter.svelte';
-  import { groupClips, clipMatchesFilters, type LibraryFilter as Filter } from '$lib/clips';
+  import { groupClips, clipMatchesFilters, displaySource, type LibraryFilter as Filter } from '$lib/clips';
   import { library, refreshLibrary } from '$lib/library.svelte';
   import { clipOrder } from '$lib/editor.svelte';
+  import { t } from '$lib/i18n.svelte';
 
   let query = $state('');
   let filters = $state<Filter[]>([]);
@@ -19,7 +20,11 @@
   const filtered = $derived(
     library.clips.filter((c) => {
       const q = query.trim().toLowerCase();
-      const matchesQuery = !q || c.title.toLowerCase().includes(q) || c.source.toLowerCase().includes(q);
+      const matchesQuery =
+        !q ||
+        c.title.toLowerCase().includes(q) ||
+        c.source.toLowerCase().includes(q) ||
+        displaySource(c.source).toLowerCase().includes(q);
       return matchesQuery && clipMatchesFilters(c, filters);
     })
   );
@@ -43,27 +48,27 @@
 <div class="clips">
   <header class="head">
     <div class="left">
-      <h1>Todos los clips</h1>
+      <h1>{t('clips.title')}</h1>
     </div>
 
     <div class="right">
       <label class="search">
         <Icon name="search" size={15} />
-        <input placeholder="Buscar clips" bind:value={query} />
+        <input placeholder={t('clips.search')} bind:value={query} />
       </label>
       <LibraryFilter clips={library.clips} bind:selected={filters} />
       <div class="sort-dd" class:open={sortOpen} bind:this={sortEl}>
         <button class="ctrl" onclick={() => (sortOpen = !sortOpen)}>
-          {sortAsc ? 'Más antiguo' : 'Más reciente'}
+          {sortAsc ? t('clips.oldest') : t('clips.newest')}
           <Icon name="chevron-down" size={13} sw={2} />
         </button>
         {#if sortOpen}
           <div class="sort-menu">
             <button class="sort-item" class:on={!sortAsc} onclick={() => { sortAsc = false; sortOpen = false; }}>
-              Más reciente
+              {t('clips.newest')}
             </button>
             <button class="sort-item" class:on={sortAsc} onclick={() => { sortAsc = true; sortOpen = false; }}>
-              Más antiguo
+              {t('clips.oldest')}
             </button>
           </div>
         {/if}
@@ -74,13 +79,13 @@
   {#if library.clips.length === 0}
     <div class="empty">
       <Icon name="clips" size={50} sw={1.3} />
-      <p>Aún no tienes clips.</p>
-      <span class="hint mono">Graba con el botón o tu atajo y aparecerán aquí.</span>
+      <p>{t('clips.emptyNone')}</p>
+      <span class="hint mono">{t('clips.emptyNoneHint')}</span>
     </div>
   {:else if filtered.length === 0}
     <div class="empty">
       <Icon name="chevrons" size={56} sw={1.2} />
-      <p>{query ? `Sin resultados para “${query}”.` : 'Sin resultados con este filtro.'}</p>
+      <p>{query ? t('clips.noResultsQuery', { query }) : t('clips.noResultsFilter')}</p>
     </div>
   {:else}
     {#each groups as group (group.label)}
