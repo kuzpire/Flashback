@@ -184,6 +184,21 @@ pub fn set_encoder(app: &tauri::AppHandle, enc: &str) -> Result<(), String> {
     write_setting(app, "encoder", serde_json::json!(enc))
 }
 
+fn read_bool(app: &tauri::AppHandle, key: &str) -> Option<bool> {
+    let s = std::fs::read_to_string(settings_path(app)?).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&s).ok()?;
+    v.get(key)?.as_bool()
+}
+
+// Rich Presence de Discord: opt-in, desactivado por defecto.
+pub fn get_discord_rpc(app: &tauri::AppHandle) -> bool {
+    read_bool(app, "discord_rpc").unwrap_or(false)
+}
+
+pub fn set_discord_rpc(app: &tauri::AppHandle, on: bool) -> Result<(), String> {
+    write_setting(app, "discord_rpc", serde_json::json!(on))
+}
+
 pub fn set_clips_dir(app: &tauri::AppHandle, dir: &str) -> Result<(), String> {
     let path = PathBuf::from(dir);
     std::fs::create_dir_all(&path).map_err(|e| format!("No se pudo crear la carpeta: {e}"))?;

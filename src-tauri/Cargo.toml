@@ -1,6 +1,6 @@
 [package]
 name = "flashback"
-version = "1.1.2"
+version = "1.2.0"
 description = "Captura y edición ligera de clips de juego para Windows"
 authors = ["Josh Bernal"]
 edition = "2021"
@@ -28,6 +28,7 @@ reqwest = { version = "0.12", features = ["json"] }
 base64 = "0.22"
 tokio = { version = "1", features = ["rt"] }
 urlencoding = "2"
+discord-rich-presence = "0.2"
 # time 0.3.48 rompe la coherencia con cookie 0.18.1 (que arrastra Tauri): error E0119.
 time = "=0.3.47"
 

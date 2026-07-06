@@ -168,6 +168,12 @@ pub fn current_game_pid() -> Option<u32> {
     CURRENT.lock().unwrap().as_ref().map(|(pid, _)| *pid)
 }
 
+// Juego actualmente rastreado (primer plano), para el Rich Presence de Discord. Refleja la
+// última detección; la UI ya sondea detect_game periódicamente, lo que lo mantiene fresco.
+pub fn current_game() -> Option<DetectedGame> {
+    CURRENT.lock().unwrap().as_ref().map(|(_, g)| g.clone())
+}
+
 #[cfg(target_os = "windows")]
 fn detect_with(map: &GameMap) -> Option<DetectedGame> {
     let procs = running_processes();

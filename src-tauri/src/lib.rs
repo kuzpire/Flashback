@@ -4,6 +4,7 @@ mod audio;
 mod capture;
 mod config;
 mod detect;
+mod discord;
 mod editor;
 mod edits;
 mod library;
@@ -67,6 +68,18 @@ fn get_encoder(app: tauri::AppHandle) -> String {
 #[tauri::command]
 fn set_encoder(app: tauri::AppHandle, enc: String) -> Result<(), String> {
     config::set_encoder(&app, &enc)
+}
+
+#[tauri::command]
+fn get_discord_rpc(app: tauri::AppHandle) -> bool {
+    config::get_discord_rpc(&app)
+}
+
+#[tauri::command]
+fn set_discord_rpc(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    config::set_discord_rpc(&app, enabled)?;
+    discord::set_enabled(enabled);
+    Ok(())
 }
 
 #[tauri::command]
@@ -383,6 +396,8 @@ pub fn run() {
             // Permitir al protocolo asset leer las carpetas de clips y capturas (pueden estar fuera
             // de app_data), o el editor no podría reproducir/leer los archivos guardados ahí.
             config::allow_asset_scopes(app.handle());
+            // Rich Presence de Discord: arranca el gestor con el valor persistido (off por defecto).
+            discord::init(config::get_discord_rpc(app.handle()));
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.set_min_size(Some(tauri::LogicalSize { width: 1200.0, height: 675.0 }));
                 let _ = w.set_size(tauri::LogicalSize { width: 1200.0, height: 675.0 });
@@ -442,6 +457,8 @@ pub fn run() {
             set_disabled_games,
             get_encoder,
             set_encoder,
+            get_discord_rpc,
+            set_discord_rpc,
             list_monitors,
             list_audio_inputs,
             start_capture,

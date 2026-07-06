@@ -43,6 +43,7 @@
 
   let encoder = $state<EncoderOption>('Auto');
   let autoDelete = $state(true);
+  let discordRpc = $state(false);
 
   let folder = $state('');
   let changingFolder = $state(false);
@@ -51,7 +52,13 @@
     invoke<string>('get_encoder').then((e) => {
       if (ENCODER_OPTIONS.includes(e as EncoderOption)) encoder = e as EncoderOption;
     }).catch(() => {});
+    invoke<boolean>('get_discord_rpc').then((v) => (discordRpc = v)).catch(() => {});
   });
+
+  function setDiscordRpc(on: boolean) {
+    discordRpc = on;
+    invoke('set_discord_rpc', { enabled: on }).catch(() => {});
+  }
 
   function setEncoder(opt: EncoderOption) {
     encoder = opt;
@@ -253,6 +260,19 @@
         </div>
       </div>
     {/each}
+  </section>
+
+  <section class="panel">
+    <span class="label panel-title">Integraciones</span>
+    <div class="setting">
+      <div class="info">
+        <h3>Discord Rich Presence</h3>
+        <p>Muestra en tu perfil de Discord que usas Flashback, con el juego detectado.</p>
+      </div>
+      <button class="switch" class:on={discordRpc} onclick={() => setDiscordRpc(!discordRpc)} role="switch" aria-checked={discordRpc} aria-label="Discord Rich Presence">
+        <span class="knob"></span>
+      </button>
+    </div>
   </section>
 </div>
 

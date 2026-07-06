@@ -114,7 +114,7 @@ mod win {
     };
     use windows::Graphics::DirectX::Direct3D11::IDirect3DDevice;
     use windows::Graphics::DirectX::DirectXPixelFormat;
-    use windows::Win32::Foundation::{HANDLE, HMODULE, HWND, LPARAM, RECT, SYSTEMTIME};
+    use windows::Win32::Foundation::{E_POINTER, HANDLE, HMODULE, HWND, LPARAM, RECT, SYSTEMTIME};
     use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
     use windows::Win32::Graphics::Direct3D11::{
         D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Multithread, ID3D11Texture2D,
@@ -656,7 +656,7 @@ mod win {
             let mut token = 0u32;
             let mut manager: Option<IMFDXGIDeviceManager> = None;
             unsafe { MFCreateDXGIDeviceManager(&mut token, &mut manager)? };
-            let manager = manager.unwrap();
+            let manager = manager.ok_or_else(null_out)?;
             unsafe { manager.ResetDevice(device, token)? };
 
             let ctx = unsafe { device.GetImmediateContext()? };
@@ -669,7 +669,7 @@ mod win {
             let attrs = unsafe {
                 let mut a: Option<IMFAttributes> = None;
                 MFCreateAttributes(&mut a, 3)?;
-                let a = a.unwrap();
+                let a = a.ok_or_else(null_out)?;
                 if use_hw {
                     a.SetUINT32(&MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, 1)?;
                     a.SetUnknown(&MF_SINK_WRITER_D3D_MANAGER, &manager)?;
@@ -743,7 +743,7 @@ mod win {
             for _ in 0..6 {
                 let mut t: Option<ID3D11Texture2D> = None;
                 unsafe { device.CreateTexture2D(&desc, None, Some(&mut t))? };
-                pool.push(t.unwrap());
+                pool.push(t.ok_or_else(null_out)?);
             }
 
             Ok(Encoder {
@@ -1308,19 +1308,30 @@ mod win {
                         announced = true;
                     }
                     run_pump(&pipe, &stop, &buffer, window_mode);
+                    let lost = pipe.device_lost.load(Ordering::SeqCst);
                     teardown_replay(pipe);
-                    if stop.load(Ordering::SeqCst) || !window_mode {
+                    if stop.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    // Modo monitor sin pérdida de device: fin normal (hoy el pump solo retorna por
+                    // stop, size_changed o device_lost; en monitor no hay resize, así que es
+                    // defensivo). Con el device perdido se reconstruye también en modo monitor: el
+                    // build siguiente crea un device nuevo y conserva el ring si el tamaño coincide.
+                    if !window_mode && !lost {
                         break;
                     }
                 }
                 Err(e) => {
-                    if !window_mode {
-                        if !announced {
-                            let _ = ready.send(Err(e));
-                        }
-                        break;
-                    }
+                    // Fallo al (re)construir. Si aún no habíamos arrancado es un fallo inicial: en
+                    // monitor es definitivo (se reporta y se sale); en ventana se deja armado y se
+                    // espera a que el juego sea capturable. Si ya habíamos arrancado (reconstrucción
+                    // tras device-lost o reconexión), se reintenta en ambos modos: el device puede
+                    // tardar en volver tras un TDR.
                     if !announced {
+                        if !window_mode {
+                            let _ = ready.send(Err(e));
+                            break;
+                        }
                         let _ = ready.send(Ok(()));
                         announced = true;
                     }
@@ -1397,6 +1408,9 @@ mod win {
         // Lo marca el handler de frames cuando la ventana cambia de tamaño: el bombeo sale y el
         // hilo de replay reconstruye el pipeline al nuevo tamaño.
         size_changed: Arc<AtomicBool>,
+        // Lo marca el worker del encoder cuando el device D3D se pierde (TDR/reset de GPU): el
+        // bombeo sale y el hilo de replay reconstruye el pipeline con un device nuevo (§4.4).
+        device_lost: Arc<AtomicBool>,
     }
     unsafe impl Send for ReplayPipeline {}
     // Se comparte por referencia entre el hilo de pacing y el worker del encoder (thread::scope
@@ -1486,7 +1500,7 @@ mod win {
         let mut token = 0u32;
         let mut manager: Option<IMFDXGIDeviceManager> = None;
         unsafe { MFCreateDXGIDeviceManager(&mut token, &mut manager)? };
-        let manager = manager.unwrap();
+        let manager = manager.ok_or_else(null_out)?;
         unsafe { manager.ResetDevice(&device, token)? };
         let ctx = unsafe { device.GetImmediateContext()? };
         if let Ok(mt) = ctx.cast::<ID3D11Multithread>() {
@@ -1680,7 +1694,7 @@ mod win {
                     let tex = create_bgra_textures(&device, width, height, 1)?
                         .into_iter()
                         .next()
-                        .unwrap();
+                        .ok_or_else(null_out)?;
                     Some(Card { overlay, tex })
                 }
                 Err(e) => {
@@ -1722,7 +1736,21 @@ mod win {
             card,
             game_hwnd,
             size_changed,
+            device_lost: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    // true si el device D3D se perdió (TDR, reset de GPU, driver reiniciado). Se consulta solo
+    // cuando el convert/encode ya falló, para distinguir un fallo transitorio de la pérdida real
+    // del dispositivo y disparar la reconstrucción del pipeline.
+    fn device_removed(device: &ID3D11Device) -> bool {
+        unsafe { device.GetDeviceRemovedReason().is_err() }
+    }
+
+    // Out-param nulo tras un Create* que devolvió S_OK (driver defectuoso): se propaga como error
+    // recuperable en vez de romper el hilo con un panic. En el replay dispara la reconstrucción.
+    fn null_out() -> windows::core::Error {
+        windows::core::Error::from_hresult(E_POINTER)
     }
 
     // Conversor de color + escalado: entrada ARGB32 a resolución de captura (in_*),
@@ -2156,7 +2184,10 @@ mod win {
             // descartado), para que la transición cartel↔juego abra siempre un GOP nuevo.
             let mut pending_key = false;
 
-            while !stop.load(Ordering::SeqCst) && !pipe.size_changed.load(Ordering::Relaxed) {
+            while !stop.load(Ordering::SeqCst)
+            && !pipe.size_changed.load(Ordering::Relaxed)
+            && !pipe.device_lost.load(Ordering::Relaxed)
+        {
                 foc.poll(window_mode, pipe);
 
                 // Drenar la cola sin bloquear: solo nos quedamos con el frame más reciente; el
@@ -2285,7 +2316,10 @@ mod win {
         let mut pts_fifo: VecDeque<i64> = VecDeque::new();
         let mut convert_err_logged = false;
 
-        while !stop.load(Ordering::SeqCst) && !pipe.size_changed.load(Ordering::Relaxed) {
+        while !stop.load(Ordering::SeqCst)
+            && !pipe.size_changed.load(Ordering::Relaxed)
+            && !pipe.device_lost.load(Ordering::Relaxed)
+        {
             // Drenar eventos del encoder asíncrono sin bloquear (créditos + salida).
             loop {
                 let ev = unsafe { events.GetEvent(MF_EVENT_FLAG_NO_WAIT) };
@@ -2326,8 +2360,14 @@ mod win {
                     Ok(Some(s)) => s,
                     Ok(None) => continue,
                     Err(e) => {
-                        // Un fallo persistente aquí (p. ej. device D3D perdido por un TDR)
-                        // dejaría el replay mudo. Se reporta una sola vez.
+                        // Device D3D perdido (TDR/reset de GPU): marca la pérdida para que el pump
+                        // salga y el hilo de replay reconstruya el pipeline con un device nuevo
+                        // (§4.4). Cualquier otro fallo se reporta una sola vez y se sigue.
+                        if device_removed(&pipe._device) {
+                            eprintln!("replay: device D3D perdido (convert), reconstruyendo");
+                            pipe.device_lost.store(true, Ordering::Relaxed);
+                            return;
+                        }
                         if !convert_err_logged {
                             eprintln!("replay: fallo del conversor: {e:?}");
                             convert_err_logged = true;
@@ -2341,6 +2381,10 @@ mod win {
                 if feed_encoder_async(encoder, &nv12, buffer, &mut seq_grabbed, &mut pts_fifo) {
                     pts_fifo.push_back(item.pts);
                     did = true;
+                } else if device_removed(&pipe._device) {
+                    eprintln!("replay: device D3D perdido (encoder), reconstruyendo");
+                    pipe.device_lost.store(true, Ordering::Relaxed);
+                    return;
                 }
                 need -= 1;
             }
@@ -2371,7 +2415,10 @@ mod win {
         let mut emitted: i64 = -1;
         let mut emitted_pts: i64 = -1;
 
-        while !stop.load(Ordering::SeqCst) && !pipe.size_changed.load(Ordering::Relaxed) {
+        while !stop.load(Ordering::SeqCst)
+            && !pipe.size_changed.load(Ordering::Relaxed)
+            && !pipe.device_lost.load(Ordering::Relaxed)
+        {
             foc.poll(window_mode, pipe);
 
             loop {
@@ -2444,7 +2491,16 @@ mod win {
     ) {
         let nv12 = match convert_frame(pipe, bgra, pts) {
             Ok(Some(s)) => s,
-            _ => return,
+            Ok(None) => return,
+            Err(_) => {
+                // Device D3D perdido (TDR/reset): marca la pérdida para que el pump síncrono
+                // salga y el hilo de replay reconstruya con un device nuevo (§4.4).
+                if device_removed(&pipe._device) {
+                    eprintln!("replay: device D3D perdido (convert sw), reconstruyendo");
+                    pipe.device_lost.store(true, Ordering::Relaxed);
+                }
+                return;
+            }
         };
 
         let mut fed_ok = false;
@@ -2457,7 +2513,12 @@ mod win {
                 Err(e) if e.code() == MF_E_NOTACCEPTING => {
                     let _ = drain_encoder_output(&pipe.encoder, buffer, seq_grabbed, pts_fifo);
                 }
-                Err(_) => break,
+                Err(_) => {
+                    if device_removed(&pipe._device) {
+                        pipe.device_lost.store(true, Ordering::Relaxed);
+                    }
+                    break;
+                }
             }
         }
         if fed_ok {
@@ -2832,7 +2893,7 @@ mod win {
         let attrs = unsafe {
             let mut a: Option<IMFAttributes> = None;
             MFCreateAttributes(&mut a, 2)?;
-            let a = a.unwrap();
+            let a = a.ok_or_else(null_out)?;
             a.SetUINT32(&MF_SINK_WRITER_DISABLE_THROTTLING, 1)?;
             // Sin URL no se infiere el contenedor: hay que decirlo explícitamente.
             a.SetGUID(&MF_TRANSCODE_CONTAINERTYPE, &MFTranscodeContainerType_MPEG4)?;
@@ -3012,7 +3073,7 @@ mod win {
         for _ in 0..count {
             let mut t: Option<ID3D11Texture2D> = None;
             unsafe { device.CreateTexture2D(&desc, None, Some(&mut t))? };
-            out.push(t.unwrap());
+            out.push(t.ok_or_else(null_out)?);
         }
         Ok(out)
     }
@@ -3042,7 +3103,7 @@ mod win {
         for _ in 0..count {
             let mut t: Option<ID3D11Texture2D> = None;
             unsafe { device.CreateTexture2D(&desc, None, Some(&mut t))? };
-            let tex = t.unwrap();
+            let tex = t.ok_or_else(null_out)?;
             let buf = unsafe { MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, &tex, 0, false)? };
             let sample = unsafe { MFCreateSample()? };
             unsafe { sample.AddBuffer(&buf)? };
@@ -3088,7 +3149,7 @@ mod win {
         };
         let mut t: Option<ID3D11Texture2D> = None;
         unsafe { device.CreateTexture2D(&desc, None, Some(&mut t))? };
-        Ok(t.unwrap())
+        Ok(t.ok_or_else(null_out)?)
     }
 
     fn pack2(high: u32, low: u32) -> u64 {
@@ -3527,5 +3588,89 @@ mod win {
             .position(|&c| c == 0)
             .unwrap_or(info.szDevice.len());
         String::from_utf16_lossy(&info.szDevice[..len])
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::sync::atomic::{AtomicI64, Ordering};
+
+        #[test]
+        fn clamp_fps_bounds() {
+            assert_eq!(clamp_fps(5), 10);
+            assert_eq!(clamp_fps(60), 60);
+            assert_eq!(clamp_fps(1000), 240);
+        }
+
+        #[test]
+        fn fps_interval_values() {
+            assert_eq!(fps_interval(0), 0);
+            assert_eq!(fps_interval(60), 166_666);
+            assert_eq!(fps_interval(240), 41_666);
+        }
+
+        #[test]
+        fn cfr_pts_has_no_drift() {
+            // El slot `fps` cae exactamente en el segundo, sin acumular error aunque 10⁷/fps no
+            // sea entero: es la garantía del CFR por índice de slot.
+            for fps in [20u32, 30, 60, 120, 144, 240] {
+                assert_eq!(cfr_pts(fps as i64, fps), 10_000_000, "fps={fps}");
+            }
+            assert_eq!(cfr_pts(0, 60), 0);
+            // Monotonía estricta.
+            assert!(cfr_pts(2, 60) > cfr_pts(1, 60));
+        }
+
+        #[test]
+        fn enc_buffer_frames_clamped() {
+            assert_eq!(enc_buffer_frames(10), 6);
+            assert_eq!(enc_buffer_frames(20), 6);
+            assert_eq!(enc_buffer_frames(60), 18);
+            assert_eq!(enc_buffer_frames(240), 24);
+        }
+
+        #[test]
+        fn output_dims_never_upscales() {
+            assert_eq!(output_dims(1920, 1080, 0), (1920, 1080));
+            assert_eq!(output_dims(1920, 1080, 1080), (1920, 1080));
+            assert_eq!(output_dims(1920, 1080, 2160), (1920, 1080));
+            assert_eq!(output_dims(1920, 1080, 720), (1280, 720));
+            // Redondeo a par manteniendo aspecto.
+            assert_eq!(output_dims(1918, 1080, 721), (1278, 720));
+        }
+
+        #[test]
+        fn resolve_bitrate_override_and_floor() {
+            assert_eq!(resolve_bitrate(1920, 1080, 60, 0.40, 5_000_000), 5_000_000);
+            // Combo ligero: por debajo del piso de 1 Mbps.
+            assert_eq!(target_bitrate(640, 360, 20, 0.15), 1_000_000);
+            // Más resolución/fps/calidad => más bitrate (sin depender de la exactitud del f64).
+            assert!(target_bitrate(1920, 1080, 60, 0.40) > target_bitrate(1280, 720, 60, 0.40));
+            assert!(target_bitrate(1920, 1080, 60, 0.40) > target_bitrate(1920, 1080, 30, 0.40));
+        }
+
+        #[test]
+        fn keep_frame_limits_rate() {
+            let next = AtomicI64::new(i64::MIN);
+            let interval = 100;
+            // Primer frame: siempre se guarda.
+            assert!(keep_frame(&next, 1000, interval));
+            // Demasiado pronto (dentro del intervalo): se descarta.
+            assert!(!keep_frame(&next, 1050, interval));
+            // En el slot objetivo: se guarda.
+            assert!(keep_frame(&next, 1100, interval));
+            // interval<=0 => sin límite.
+            assert!(keep_frame(&next, 0, 0));
+        }
+
+        #[test]
+        fn keep_frame_realigns_after_big_gap() {
+            let next = AtomicI64::new(i64::MIN);
+            let interval = 100;
+            assert!(keep_frame(&next, 0, interval));
+            // Hueco grande (>8 intervalos: juego minimizado/congelado): reancla al tiempo real.
+            assert!(keep_frame(&next, 2000, interval));
+            assert_eq!(next.load(Ordering::Relaxed), 2100);
+        }
     }
 }
