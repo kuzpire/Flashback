@@ -3,6 +3,7 @@
 // Instant Replay / biblioteca) y el juego detectado. Aislado del camino de captura: solo lee
 // estado cada pocos segundos y reconecta solo si Discord se cierra/abre.
 
+use std::collections::HashMap;
 use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -22,8 +23,11 @@ fn state() -> &'static (Mutex<Shared>, Condvar) {
     STATE.get_or_init(|| (Mutex::new(Shared { enabled: false }), Condvar::new()))
 }
 
+static APP: OnceLock<tauri::AppHandle> = OnceLock::new();
+
 // Arranca el gestor una sola vez con el valor persistido. Idempotente.
-pub fn init(enabled: bool) {
+pub fn init(app: tauri::AppHandle, enabled: bool) {
+    let _ = APP.set(app);
     set_enabled(enabled);
     static STARTED: OnceLock<()> = OnceLock::new();
     if STARTED.set(()).is_ok() {
@@ -58,6 +62,9 @@ fn run() {
         .unwrap_or(0);
     let mut client: Option<DiscordIpcClient> = None;
     let mut last_key = String::new();
+    // Arte resuelto por nombre de juego: una sola llamada HTTP por juego (URL pública o el
+    // asset de fallback). Se puebla perezosamente en presence_fields.
+    let mut art_cache: HashMap<String, String> = HashMap::new();
 
     loop {
         if !is_enabled() {
@@ -86,7 +93,7 @@ fn run() {
             }
         }
 
-        let (details, state_line, large_image, large_text) = presence_fields();
+        let (details, state_line, large_image, large_text) = presence_fields(&mut art_cache);
         // Solo se reenvía a Discord si algo cambió (evita spam de set_activity).
         let key = format!("{details}\u{1}{state_line}\u{1}{large_image}\u{1}{large_text}");
         if key != last_key {
@@ -126,7 +133,7 @@ fn run() {
 }
 
 // Detalle según captura; el juego detectado va como imagen grande (arte) + línea de estado.
-fn presence_fields() -> (String, String, String, String) {
+fn presence_fields(art_cache: &mut HashMap<String, String>) -> (String, String, String, String) {
     let details = if crate::capture::status().running {
         "Grabando".to_string()
     } else if crate::capture::replay_active() {
@@ -137,14 +144,7 @@ fn presence_fields() -> (String, String, String, String) {
 
     match crate::detect::current_game() {
         Some(g) => {
-            // Steam: el header público del CDN sirve de imagen grande. Sin AppID no hay URL
-            // pública (el arte se cachea local como data-url, que Discord no admite) → logo.
-            let large_image = g
-                .steam_appid
-                .map(|id| {
-                    format!("https://cdn.cloudflare.steamstatic.com/steam/apps/{id}/header.jpg")
-                })
-                .unwrap_or_else(|| FLASHBACK_ASSET.to_string());
+            let large_image = art_url(art_cache, &g);
             (details, g.name.clone(), large_image, g.name)
         }
         None => (
@@ -154,4 +154,24 @@ fn presence_fields() -> (String, String, String, String) {
             "Flashback".to_string(),
         ),
     }
+}
+
+// Imagen grande del juego. Prioridad: icono nativo del CDN de Discord (fiable, directo) para los
+// juegos de la lista detectable; si no, el icono de SteamGridDB (cacheado por nombre). Si nada se
+// puede resolver, cae al asset del logo de Flashback.
+fn art_url(cache: &mut HashMap<String, String>, g: &crate::detect::DetectedGame) -> String {
+    if let Some(url) = &g.icon_url {
+        return url.clone();
+    }
+    if let Some(url) = cache.get(&g.name) {
+        return url.clone();
+    }
+    let resolved = APP
+        .get()
+        .and_then(|app| {
+            tauri::async_runtime::block_on(crate::artwork::game_art_url(app, &g.name, g.steam_appid))
+        })
+        .unwrap_or_else(|| FLASHBACK_ASSET.to_string());
+    cache.insert(g.name.clone(), resolved.clone());
+    resolved
 }

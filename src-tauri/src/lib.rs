@@ -397,7 +397,7 @@ pub fn run() {
             // de app_data), o el editor no podría reproducir/leer los archivos guardados ahí.
             config::allow_asset_scopes(app.handle());
             // Rich Presence de Discord: arranca el gestor con el valor persistido (off por defecto).
-            discord::init(config::get_discord_rpc(app.handle()));
+            discord::init(app.handle().clone(), config::get_discord_rpc(app.handle()));
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.set_min_size(Some(tauri::LogicalSize { width: 1200.0, height: 675.0 }));
                 let _ = w.set_size(tauri::LogicalSize { width: 1200.0, height: 675.0 });

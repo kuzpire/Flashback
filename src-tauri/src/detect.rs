@@ -28,7 +28,15 @@ const MINECRAFT_HINTS: &[&str] = &[
     "pojav",
 ];
 
-type GameMap = HashMap<String, String>;
+#[derive(Clone)]
+struct GameEntry {
+    name: String,
+    // Icono nativo del juego en el CDN de Discord (PNG). Sirve como imagen grande fiable en el
+    // Rich Presence (Discord lo renderiza seguro, a diferencia de los .ico de SteamGridDB).
+    icon_url: Option<String>,
+}
+
+type GameMap = HashMap<String, GameEntry>;
 
 static MAP: Mutex<Option<Arc<GameMap>>> = Mutex::new(None);
 // Último juego detectado en primer plano; se mantiene mientras su proceso viva.
@@ -40,11 +48,18 @@ pub struct DetectedGame {
     // AppID de Steam si lo conocemos: permite arte oficial exacto (distingue
     // remasters/secuelas que comparten nombre, p. ej. The Last of Us Part I vs II).
     pub steam_appid: Option<u32>,
+    // Icono del CDN de Discord para el juego (solo los reconocidos por la lista detectable).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon_url: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct Detectable {
+    #[serde(default)]
+    id: String,
     name: String,
+    #[serde(default)]
+    icon_hash: Option<String>,
     #[serde(default)]
     executables: Vec<Executable>,
 }
@@ -73,8 +88,16 @@ fn basename(name: &str) -> String {
 fn build_map(list: Vec<Detectable>) -> GameMap {
     // Un basename solo sirve si pertenece a UN único juego. Si lo comparten varios
     // (game.exe, nw.exe, anti-cheats, helpers de motor…) se descarta: marca None.
-    let mut owners: HashMap<String, Option<String>> = HashMap::new();
+    let mut owners: HashMap<String, Option<GameEntry>> = HashMap::new();
     for game in list {
+        // Icono nativo del juego en el CDN de Discord (si la entrada trae hash de icono).
+        let icon_url = match (game.id.is_empty(), &game.icon_hash) {
+            (false, Some(hash)) => Some(format!(
+                "https://cdn.discordapp.com/app-icons/{}/{}.png",
+                game.id, hash
+            )),
+            _ => None,
+        };
         for exe in game.executables {
             if exe.is_launcher || exe.arguments.is_some() {
                 continue;
@@ -88,11 +111,14 @@ fn build_map(list: Vec<Detectable>) -> GameMap {
             }
             match owners.entry(base) {
                 Entry::Vacant(v) => {
-                    v.insert(Some(game.name.clone()));
+                    v.insert(Some(GameEntry {
+                        name: game.name.clone(),
+                        icon_url: icon_url.clone(),
+                    }));
                 }
                 Entry::Occupied(mut o) => {
                     let slot = o.get_mut();
-                    if slot.as_deref() != Some(game.name.as_str()) {
+                    if slot.as_ref().map(|e| e.name.as_str()) != Some(game.name.as_str()) {
                         *slot = None;
                     }
                 }
@@ -101,7 +127,7 @@ fn build_map(list: Vec<Detectable>) -> GameMap {
     }
     owners
         .into_iter()
-        .filter_map(|(base, owner)| owner.map(|game| (base, game)))
+        .filter_map(|(base, owner)| owner.map(|entry| (base, entry)))
         .collect()
 }
 
@@ -193,10 +219,11 @@ fn detect_with(map: &GameMap) -> Option<DetectedGame> {
 
         if let Some(base) = &base {
             // 2. Ejecutable dedicado (lista de Discord).
-            if let Some(name) = map.get(base) {
+            if let Some(entry) = map.get(base) {
                 let game = DetectedGame {
-                    name: name.clone(),
+                    name: entry.name.clone(),
                     steam_appid: None,
+                    icon_url: entry.icon_url.clone(),
                 };
                 *CURRENT.lock().unwrap() = Some((pid, game.clone()));
                 return Some(game);
@@ -217,6 +244,7 @@ fn detect_with(map: &GameMap) -> Option<DetectedGame> {
                     let game = DetectedGame {
                         name: "Minecraft".to_string(),
                         steam_appid: None,
+                        icon_url: None,
                     };
                     *CURRENT.lock().unwrap() = Some((pid, game.clone()));
                     return Some(game);
@@ -278,6 +306,7 @@ fn steam_game_from_path(path: &str) -> Option<DetectedGame> {
             return Some(DetectedGame {
                 name,
                 steam_appid: Some(appid),
+                icon_url: None,
             });
         }
     }

@@ -108,6 +108,38 @@ pub async fn game_hero(
     Some(to_data_url(&bytes))
 }
 
+// URL PÚBLICA del icono del juego para el Rich Presence de Discord: el mismo icono de la tab de
+// juegos detectados, pero pidiendo a SteamGridDB SOLO formatos web (png/webp), porque Discord no
+// renderiza los .ico. Sin icono web (o sin API key) cae a la portada vertical del CDN de Steam.
+pub async fn game_art_url(
+    app: &tauri::AppHandle,
+    name: &str,
+    steam_appid: Option<u32>,
+) -> Option<String> {
+    let client = reqwest::Client::new();
+    if let Some(key) = api_key(app) {
+        let game_id = match steam_appid {
+            Some(id) => sgdb_by_steam(&client, &key, id).await,
+            None => search_game(&client, &key, name).await,
+        };
+        if let Some(gid) = game_id {
+            let url = format!("{API_BASE}/icons/game/{gid}?mimes=image/png,image/webp");
+            if let Ok(resp) = client.get(url).bearer_auth(&key).send().await {
+                if resp.status().is_success() {
+                    if let Ok(parsed) = resp.json::<HeroResp>().await {
+                        if let Some(u) = parsed.data.into_iter().next().map(|a| a.url) {
+                            return Some(u);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    steam_appid.map(|id| {
+        format!("https://cdn.cloudflare.steamstatic.com/steam/apps/{id}/library_600x900.jpg")
+    })
+}
+
 async fn steam_hero(client: &reqwest::Client, app: &tauri::AppHandle, appid: u32) -> Option<Vec<u8>> {
     // header.jpg primero: el capsule clásico tiene siempre el logo/nombre del juego
     // visible y es mucho más reconocible que el library_hero artístico.
