@@ -597,6 +597,8 @@ mod win {
         }
         let device = device.expect("D3D11CreateDevice no devolvió device");
         let dxgi: IDXGIDevice = device.cast()?;
+        // Prioridad de scheduling GPU máxima para este device (dentro de nuestro proceso).
+        let _ = unsafe { dxgi.SetGPUThreadPriority(7) };
         let inspectable = unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi)? };
         let d3d_device: IDirect3DDevice = inspectable.cast()?;
         Ok((device, d3d_device))
@@ -1051,11 +1053,31 @@ mod win {
     struct SendTex(ID3D11Texture2D);
     unsafe impl Send for SendTex {}
 
+    // Frame BGRA CRUDO que cruza del hilo de pacing (reloj) al worker del encoder. El worker
+    // hace el convert BGRA→NV12 + el ProcessInput, así el hilo del reloj no toca la GPU y no se
+    // congela cuando el juego satura la GPU. `tex` es una referencia contada a una textura del
+    // ring BGRA (vive mientras el worker; scope hace join antes de soltar el pipe). force_key
+    // marca el frame que debe abrir un GOP nuevo (cartel↔juego).
+    struct SendItem {
+        tex: ID3D11Texture2D,
+        pts: i64,
+        force_key: bool,
+        // Contador de escritura del slot del ring del que salió `tex` (u64::MAX = cartel, que no
+        // vive en el ring y nunca es stale). El worker lo valida contra FeedCtx.seq antes de usarlo.
+        seq: u64,
+    }
+    unsafe impl Send for SendItem {}
+
     struct FeedCtx {
         ctx: ID3D11DeviceContext,
         ring: Vec<ID3D11Texture2D>,
         next: AtomicUsize,
-        tx: mpsc::Sender<(SendTex, i64)>,
+        // Contador global de la última escritura en cada slot del ring. El worker lo compara
+        // con el que viajó junto al frame: si no coincide, el handler ya sobreescribió ese slot
+        // (el ring dio la vuelta mientras el frame esperaba en cola) y el frame es basura. Así
+        // se descarta en vez de encodear contenido "del futuro" con un PTS viejo.
+        seq: Vec<AtomicU64>,
+        tx: mpsc::Sender<(SendTex, i64, u64)>,
     }
     unsafe impl Send for FeedCtx {}
     unsafe impl Sync for FeedCtx {}
@@ -1357,7 +1379,10 @@ mod win {
         frame_pool: Direct3D11CaptureFramePool,
         session: GraphicsCaptureSession,
         token: i64,
-        rx: mpsc::Receiver<(SendTex, i64)>,
+        rx: mpsc::Receiver<(SendTex, i64, u64)>,
+        // Contexto del ring BGRA (lo comparte con el handler): el worker lee `seq` para
+        // detectar frames stale (ring reciclado mientras esperaban en cola).
+        feed: Arc<FeedCtx>,
         // Tiempo absoluto (WGC) del primer frame de vídeo bombeado: i64::MIN = aún sin
         // establecer. Las pistas de audio lo leen para rebasarse al mismo origen que el
         // vídeo (ver run_pump_async/sync y los AudioSink de más abajo).
@@ -1374,6 +1399,12 @@ mod win {
         size_changed: Arc<AtomicBool>,
     }
     unsafe impl Send for ReplayPipeline {}
+    // Se comparte por referencia entre el hilo de pacing y el worker del encoder (thread::scope
+    // en run_pump_async). Es sound porque durante el bombeo cada campo no-Sync lo toca UN solo
+    // hilo: el worker usa converter/nv12_pool/nv12_next/sw/encoder/enc_events; el pacing usa rx.
+    // Los campos compartidos (video_base, size_changed) son atómicos; feed.seq se lee/escribe
+    // por atómicos entre worker y handler. Ver run_pump_async.
+    unsafe impl Sync for ReplayPipeline {}
 
     struct Card {
         overlay: crate::overlay::OutOfFocusCard,
@@ -1485,12 +1516,15 @@ mod win {
             let info = converter.GetOutputStreamInfo(0)?;
             info.dwFlags & (MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 as u32) != 0
         };
+        // El worker convierte de a un frame por vez y lo entrega al encoder; el buffer que
+        // absorbe los stalls es el ring BGRA (más abajo), no este pool. Basta con cubrir los
+        // frames que retiene NVENC en vuelo + margen del round-robin.
         let nv12_pool = if converter_provides {
             Vec::new()
         } else if software {
             create_nv12_cpu_samples(out_w, out_h, 16)?
         } else {
-            create_nv12_samples(&device, out_w, out_h, 16)?
+            create_nv12_samples(&device, out_w, out_h, 12)?
         };
 
         // Readback GPU→CPU solo en software: textura de staging + un handle al contexto
@@ -1506,13 +1540,21 @@ mod win {
             None
         };
 
-        // Anillo BGRA para FrameArrived: copia GPU→GPU y manda al hilo de bombeo.
-        let bgra_ring = create_bgra_textures(&device, width, height, 10)?;
-        let (tx, rx) = mpsc::channel::<(SendTex, i64)>();
+        // Anillo BGRA para FrameArrived: copia GPU→GPU y manda al hilo de bombeo. En hardware
+        // es además el buffer que absorbe los stalls de GPU: el pacing encola referencias a
+        // estas texturas hacia el worker, así que debe caber ~cap frames en vuelo + latest +
+        // margen (si no, el handler sobreescribiría una textura aún encolada). El software no
+        // desacopla (bombeo síncrono), 10 basta.
+        let bgra_ring_len = if software { 10 } else { enc_buffer_frames(fps) + 12 };
+        let bgra_ring = create_bgra_textures(&device, width, height, bgra_ring_len)?;
+        let (tx, rx) = mpsc::channel::<(SendTex, i64, u64)>();
+        // seq[i] = u64::MAX hasta la primera escritura; luego el contador global de esa escritura.
+        let seq = (0..bgra_ring_len).map(|_| AtomicU64::new(u64::MAX)).collect();
         let feed = Arc::new(FeedCtx {
             ctx,
             ring: bgra_ring,
             next: AtomicUsize::new(0),
+            seq,
             tx,
         });
 
@@ -1560,11 +1602,15 @@ mod win {
                                     if let Ok(tex) =
                                         unsafe { access.GetInterface::<ID3D11Texture2D>() }
                                     {
-                                        let idx = feed_h.next.fetch_add(1, Ordering::Relaxed)
-                                            % feed_h.ring.len();
+                                        let counter =
+                                            feed_h.next.fetch_add(1, Ordering::Relaxed) as u64;
+                                        let idx = counter as usize % feed_h.ring.len();
                                         let dst = feed_h.ring[idx].clone();
                                         unsafe { feed_h.ctx.CopyResource(&dst, &tex) };
-                                        let _ = feed_h.tx.send((SendTex(dst), t));
+                                        // Publica el contador DESPUÉS de la copia: el worker que
+                                        // vea este seq sabe que el contenido ya está escrito.
+                                        feed_h.seq[idx].store(counter, Ordering::Release);
+                                        let _ = feed_h.tx.send((SendTex(dst), t, counter));
                                     }
                                 }
                             }
@@ -1670,6 +1716,7 @@ mod win {
             session,
             token,
             rx,
+            feed,
             video_base,
             audio_tracks,
             card,
@@ -1726,9 +1773,8 @@ mod win {
     }
 
     // Selecciona el encoder H.264: hardware (MFT asíncrono, zero-copy GPU) si lo hay, o
-    // software (MFT síncrono, CPU) como fallback. Devuelve el generador de eventos solo
-    // en el caso asíncrono; None marca el camino software. FLASHBACK_FORCE_SW_ENCODER
-    // fuerza el software para poder validarlo en equipos que sí tienen hardware.
+    // software (CPU) como fallback. El HW MFT se usa en su modo async nativo (eventos
+    // NEED_INPUT/HAVE_OUTPUT) con un device D3D11 dedicado para no competir con WGC.
     // encoder_pref: "Auto"|"NVENC"|"AMF"|"Quick Sync"|"Software"
     fn build_encoder(
         manager: &IMFDXGIDeviceManager,
@@ -1744,7 +1790,6 @@ mod win {
         if !force_sw {
             if let Some(activate) = pick_hw_encoder(encoder_pref)? {
                 let encoder: IMFTransform = unsafe { activate.ActivateObject()? };
-                // Desbloquear el MFT asíncrono y compartir el device (zero-copy GPU).
                 unsafe {
                     let attrs = encoder.GetAttributes()?;
                     attrs.SetUINT32(&MF_TRANSFORM_ASYNC_UNLOCK, 1)?;
@@ -2040,17 +2085,17 @@ mod win {
     // Alimenta una muestra NV12 al encoder asíncrono, drenando su salida y reintentando si
     // rechaza la entrada (NOTACCEPTING). Devuelve true si el encoder la aceptó.
     fn feed_encoder_async(
-        pipe: &ReplayPipeline,
+        enc: &IMFTransform,
         nv12: &IMFSample,
         buffer: &Arc<Mutex<ReplayBuffer>>,
         seq_grabbed: &mut bool,
         pts_fifo: &mut VecDeque<i64>,
     ) -> bool {
         for _ in 0..64 {
-            match unsafe { pipe.encoder.ProcessInput(0, nv12, 0) } {
+            match unsafe { enc.ProcessInput(0, nv12, 0) } {
                 Ok(()) => return true,
                 Err(e) if e.code() == MF_E_NOTACCEPTING => {
-                    let n = drain_encoder_output(pipe, buffer, seq_grabbed, pts_fifo).unwrap_or(0);
+                    let n = drain_encoder_output(enc, buffer, seq_grabbed, pts_fifo).unwrap_or(0);
                     if n == 0 {
                         std::thread::sleep(Duration::from_millis(1));
                     }
@@ -2061,59 +2106,186 @@ mod win {
         false
     }
 
-    // Bombeo del encoder por hardware (MFT asíncrono): cadencia CFR dirigida por reloj.
-    // Drena WGC sin bloquear para mantener el "último frame real" y, en cada slot vencido,
-    // alimenta ese frame (duplicándolo si no llegó uno nuevo) con PTS = cfr_pts(slot),
-    // siempre que el encoder tenga crédito de NEED_INPUT. Así el clip sale a fps constante.
+    // Bombeo del encoder por hardware (MFT asíncrono), DESACOPLADO en dos hilos para que la
+    // GPU de un juego a pantalla completa no congele la cadencia del clip:
+    //
+    //  - Hilo de pacing (este): drena WGC para mantener el "último frame BGRA", lleva la
+    //    cadencia CFR dirigida por reloj y ENVÍA la referencia BGRA al worker por un canal.
+    //    NO toca la GPU (ni convert ni encode), así que ningún stall de GPU lo congela.
+    //  - Hilo worker (run_encoder_thread): hace el convert BGRA→NV12 y el ProcessInput (ambos
+    //    trabajos de GPU, en un solo hilo para no competir por el device entre sí), y drena la
+    //    salida al ring. Bajo carga el ProcessInput se bloquea cientos de ms: se absorbe como
+    //    latencia en la cola (buffer BGRA), no como bajón de fps.
+    //
+    // `inflight` acota la cola a ~300 ms de frames: si el worker se atrasa más, el pacing
+    // descarta el slot avanzando el reloj (hueco de 1 frame, degradación suave). El PTS se
+    // asigna aquí, contra el reloj de pared, de modo que el vídeo sigue sincronizado con el
+    // audio aunque el worker emita con retardo.
     fn run_pump_async(
         pipe: &ReplayPipeline,
         stop: &Arc<AtomicBool>,
         buffer: &Arc<Mutex<ReplayBuffer>>,
         window_mode: bool,
     ) {
-        let events = pipe.enc_events.as_ref().expect("async pump requiere eventos");
         let fps = pipe.fps;
         let interval = fps_interval(fps).max(1);
-        let mut need: i32 = 0;
-        let mut seq_grabbed = false;
-        // Timestamps de entrada en el orden en que se alimentan al encoder. Como el
-        // encoder va en Baseline (sin reordenar), la N-ésima salida corresponde al
-        // N-ésimo timestamp aquí: así fijamos el tiempo del frame en cada paquete.
-        let mut pts_fifo: VecDeque<i64> = VecDeque::new();
-        // Seguimiento de minimizado y composición del cartel "fuera de foco" (ver FocusState).
-        let mut foc = FocusState::new();
-        // Último frame real recibido de WGC; se duplica en los slots sin frame nuevo.
-        let mut latest: Option<ID3D11Texture2D> = None;
-        // Reloj de cadencia: t0 se ancla al primer frame emitido; `emitted` es el último slot
-        // codificado y `emitted_pts` su PTS (monotonía en la frontera con el cartel).
-        let mut t0: Option<Instant> = None;
-        let mut emitted: i64 = -1;
-        let mut emitted_pts: i64 = -1;
+        let cap = enc_buffer_frames(fps);
 
-        while !stop.load(Ordering::SeqCst) && !pipe.size_changed.load(Ordering::Relaxed) {
-            foc.poll(window_mode, pipe);
+        // Canal pacing→worker (lleva frames BGRA crudos) y contador en vuelo (backpressure).
+        let (tx, rx) = mpsc::channel::<SendItem>();
+        let inflight = Arc::new(AtomicUsize::new(0));
 
-            // Drenar la cola sin bloquear: solo nos quedamos con el frame más reciente; el
-            // resto se descarta porque estamos remuestreando a una cadencia fija.
-            loop {
-                match pipe.rx.try_recv() {
-                    Ok(f) => {
-                        foc.note_real_frame(&f.0 .0, f.1);
-                        if !foc.minimized {
-                            latest = Some(f.0 .0);
+        // thread::scope: el worker toma prestado &pipe (Sync) y se une al cerrar el scope, así
+        // las texturas BGRA en vuelo (del ring de pipe) siguen vivas mientras el worker las usa.
+        std::thread::scope(|s| {
+            let inflight_w = inflight.clone();
+            s.spawn(move || run_encoder_thread(pipe, buffer, stop, rx, inflight_w));
+
+            // Seguimiento de minimizado y composición del cartel "fuera de foco" (ver FocusState).
+            let mut foc = FocusState::new();
+            // Última textura BGRA real de WGC (y el contador de su slot en el ring, para que el
+            // worker detecte si se recicló); se duplica en los slots sin frame nuevo.
+            let mut latest: Option<ID3D11Texture2D> = None;
+            let mut latest_seq: u64 = u64::MAX;
+            // Reloj de cadencia: t0 se ancla al primer frame enviado; `emitted` es el último slot
+            // emitido y `emitted_pts` su PTS (monotonía en la frontera con el cartel).
+            let mut t0: Option<Instant> = None;
+            let mut emitted: i64 = -1;
+            let mut emitted_pts: i64 = -1;
+            // Petición de keyframe pendiente: viaja con el próximo frame ENVIADO (no con uno
+            // descartado), para que la transición cartel↔juego abra siempre un GOP nuevo.
+            let mut pending_key = false;
+
+            while !stop.load(Ordering::SeqCst) && !pipe.size_changed.load(Ordering::Relaxed) {
+                foc.poll(window_mode, pipe);
+
+                // Drenar la cola sin bloquear: solo nos quedamos con el frame más reciente; el
+                // resto se descarta porque estamos remuestreando a una cadencia fija.
+                loop {
+                    match pipe.rx.try_recv() {
+                        Ok(f) => {
+                            foc.note_real_frame(&f.0 .0, f.1);
+                            if !foc.minimized {
+                                latest = Some(f.0 .0);
+                                latest_seq = f.2;
+                            }
+                        }
+                        Err(mpsc::TryRecvError::Empty) => break,
+                        Err(mpsc::TryRecvError::Disconnected) => break,
+                    }
+                }
+
+                if foc.take_force_key() {
+                    pending_key = true;
+                }
+
+                if foc.minimized {
+                    // Suspender la cadencia CFR: el puntero de slot avanza con el reloj pero no
+                    // codificamos duplicados (evita un golpe al restaurar). El cartel cubre el
+                    // tramo a baja cadencia, anclando su PTS a la rejilla de slots.
+                    if let Some(start) = t0 {
+                        emitted = emitted.max(elapsed_slots(start, interval));
+                    }
+                    // card_due() avanza su reloj interno como efecto secundario, así que solo se
+                    // consulta cuando hay hueco en la cola (si no, perderíamos cartelitos).
+                    if inflight.load(Ordering::Relaxed) < cap && foc.card_due().is_some() {
+                        if let Some(c) = pipe.card.as_ref() {
+                            let slot = emitted + 1;
+                            let pts = cfr_pts(slot, fps).max(emitted_pts + 1);
+                            inflight.fetch_add(1, Ordering::Relaxed);
+                            let force_key = std::mem::take(&mut pending_key);
+                            // El cartel no vive en el ring: seq=MAX => el worker no lo valida.
+                            let item = SendItem { tex: c.tex.clone(), pts, force_key, seq: u64::MAX };
+                            if tx.send(item).is_err() {
+                                break;
+                            }
+                            emitted = slot;
+                            emitted_pts = pts;
                         }
                     }
-                    Err(mpsc::TryRecvError::Empty) => break,
-                    Err(mpsc::TryRecvError::Disconnected) => return,
+                } else if let Some(src) = latest.clone() {
+                    // El reloj se ancla DESPUÉS del primer envío: NVENC inicializa su sesión de
+                    // forma perezosa en el primer ProcessInput y puede bloquear ~200 ms. Ese
+                    // arranque lo absorbe la cola (frames reales encolados), no un backlog de
+                    // duplicados congelados. Mientras t0 sea None solo se emite el slot 0.
+                    let cur = match t0 {
+                        Some(start) => elapsed_slots(start, interval),
+                        None => emitted + 1,
+                    };
+                    // Red de seguridad: el pacing ya no toca la GPU (el convert vive en el
+                    // worker), así que no debería atrasarse; si aun así lo hiciera, resincroniza
+                    // para no desincronizar el audio.
+                    if cur - emitted > fps as i64 {
+                        emitted = cur - 1;
+                        emitted_pts = emitted_pts.max(cfr_pts(emitted, fps));
+                    }
+
+                    // Un frame por slot vencido. Si la cola está llena (worker saturado >~cap
+                    // frames), se descarta el slot avanzando el reloj: hueco de 1 frame en vez
+                    // de un corte. El envío es solo clonar la referencia BGRA (cero GPU).
+                    while emitted < cur {
+                        let slot = emitted + 1;
+                        let pts = cfr_pts(slot, fps).max(emitted_pts + 1);
+                        if inflight.load(Ordering::Relaxed) >= cap {
+                            emitted = slot;
+                            emitted_pts = pts;
+                            continue;
+                        }
+                        inflight.fetch_add(1, Ordering::Relaxed);
+                        let force_key = std::mem::take(&mut pending_key);
+                        let item = SendItem { tex: src.clone(), pts, force_key, seq: latest_seq };
+                        if tx.send(item).is_err() {
+                            break;
+                        }
+                        emitted = slot;
+                        emitted_pts = pts;
+                        if t0.is_none() {
+                            // Primer frame enviado: arranca el reloj y fija el origen temporal del
+                            // vídeo (escala WGC) para que el audio, rebasado contra video_base,
+                            // comparta el cero con el vídeo.
+                            pipe.video_base.store(foc.last_time, Ordering::SeqCst);
+                            t0 = Some(Instant::now());
+                        }
+                    }
                 }
+
+                std::thread::sleep(pace_sleep(interval));
             }
 
-            // El siguiente frame alimentado (cartel al minimizar, o real al volver) arranca un
-            // GOP nuevo, para que la transición cartel↔juego no arrastre referencias.
-            if foc.take_force_key() {
-                force_keyframe(pipe);
-            }
+            // Cierra el canal: el worker ve Disconnected y sale; el scope hace join al cerrar.
+            drop(tx);
+        });
+    }
 
+    // Worker del encoder (thread::scope, toma prestado &pipe): recibe frames BGRA crudos del
+    // pacing, hace el convert BGRA→NV12 y el ProcessInput bloqueante (ambos trabajos de GPU
+    // AQUÍ, en un solo hilo, para no competir por el device con la cadencia), y vuelca la
+    // salida al ring. Así el hilo del reloj no toca la GPU y no se congela cuando el juego la
+    // satura: los stalls se absorben como latencia en la cola (buffer BGRA), no como bajón.
+    fn run_encoder_thread(
+        pipe: &ReplayPipeline,
+        buffer: &Arc<Mutex<ReplayBuffer>>,
+        stop: &Arc<AtomicBool>,
+        rx: mpsc::Receiver<SendItem>,
+        inflight: Arc<AtomicUsize>,
+    ) {
+        unsafe {
+            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        }
+        let _mmcss = MmcssTask::new("Capture");
+        let encoder = &pipe.encoder;
+        let events = pipe
+            .enc_events
+            .as_ref()
+            .expect("async pump requiere eventos");
+        let mut need: i32 = 0;
+        let mut seq_grabbed = false;
+        // Timestamps de entrada en orden de alimentación: como el encoder va en Baseline (sin
+        // reordenar), la N-ésima salida corresponde al N-ésimo timestamp aquí.
+        let mut pts_fifo: VecDeque<i64> = VecDeque::new();
+        let mut convert_err_logged = false;
+
+        while !stop.load(Ordering::SeqCst) && !pipe.size_changed.load(Ordering::Relaxed) {
             // Drenar eventos del encoder asíncrono sin bloquear (créditos + salida).
             loop {
                 let ev = unsafe { events.GetEvent(MF_EVENT_FLAG_NO_WAIT) };
@@ -2125,73 +2297,58 @@ mod win {
                 if et == ME_TRANSFORM_NEED_INPUT {
                     need += 1;
                 } else if et == ME_TRANSFORM_HAVE_OUTPUT {
-                    let _ = drain_encoder_output(pipe, buffer, &mut seq_grabbed, &mut pts_fifo);
+                    let _ = drain_encoder_output(encoder, buffer, &mut seq_grabbed, &mut pts_fifo);
                 }
             }
 
-            if foc.minimized {
-                // Suspender la cadencia CFR: el puntero de slot avanza con el reloj pero no
-                // codificamos duplicados (evita un golpe al restaurar). El cartel cubre el
-                // tramo a baja cadencia, anclando su PTS a la rejilla de slots.
-                if let Some(start) = t0 {
-                    emitted = emitted.max(elapsed_slots(start, interval));
+            // Con crédito y frames encolados: convertir y alimentar. Tanto el convert como el
+            // ProcessInput pueden bloquearse aquí bajo carga de GPU: no pasa nada, no congela al
+            // pacing; la cola BGRA absorbe el retardo.
+            let mut did = false;
+            while need > 0 {
+                let item = match rx.try_recv() {
+                    Ok(item) => item,
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => return,
+                };
+                inflight.fetch_sub(1, Ordering::Relaxed);
+                // Frame stale: mientras esperaba en cola, el handler recicló su slot del ring
+                // (cola llena sostenida bajo carga). Su textura ya tiene contenido "del futuro";
+                // descártalo (hueco limpio de 1 frame) en vez de encodear ese frame erróneo.
+                if item.seq != u64::MAX
+                    && pipe.feed.seq[item.seq as usize % pipe.feed.ring.len()]
+                        .load(Ordering::Acquire)
+                        != item.seq
+                {
+                    continue;
                 }
-                // card_due() avanza su reloj interno como efecto secundario, así que solo se
-                // consulta cuando hay crédito para emitir (si no, perderíamos cartelitos).
-                if need > 0 && foc.card_due().is_some() {
-                    if let Some(c) = pipe.card.as_ref() {
-                        let slot = emitted + 1;
-                        let pts = cfr_pts(slot, fps).max(emitted_pts + 1);
-                        if let Ok(Some(nv12)) = convert_frame(pipe, &c.tex, pts) {
-                            if feed_encoder_async(pipe, &nv12, buffer, &mut seq_grabbed, &mut pts_fifo) {
-                                pts_fifo.push_back(pts);
-                                need -= 1;
-                                emitted = slot;
-                                emitted_pts = pts;
-                            }
+                let nv12 = match convert_frame(pipe, &item.tex, item.pts) {
+                    Ok(Some(s)) => s,
+                    Ok(None) => continue,
+                    Err(e) => {
+                        // Un fallo persistente aquí (p. ej. device D3D perdido por un TDR)
+                        // dejaría el replay mudo. Se reporta una sola vez.
+                        if !convert_err_logged {
+                            eprintln!("replay: fallo del conversor: {e:?}");
+                            convert_err_logged = true;
                         }
+                        continue;
                     }
+                };
+                if item.force_key {
+                    force_keyframe(encoder);
                 }
-            } else if let Some(src) = latest.clone() {
-                let now = Instant::now();
-                let start = *t0.get_or_insert_with(|| {
-                    // Primer frame: fija el origen temporal del vídeo (escala WGC) para que el
-                    // audio, que se rebasa contra video_base, comparta el cero con el vídeo.
-                    pipe.video_base.store(foc.last_time, Ordering::SeqCst);
-                    now
-                });
-                let cur = elapsed_slots(start, interval);
-                // Si el encoder no sostiene la tasa (posible a 240), `emitted` se quedaría atrás
-                // del reloj sin fin y el PTS se desincronizaría del audio. Resincronizamos cerca
-                // del slot actual descartando los duplicados atrasados (CFR best-effort con algún
-                // hueco; a 60 no ocurre).
-                if cur - emitted > fps as i64 {
-                    emitted = cur - 1;
-                    emitted_pts = emitted_pts.max(cfr_pts(emitted, fps));
+                if feed_encoder_async(encoder, &nv12, buffer, &mut seq_grabbed, &mut pts_fifo) {
+                    pts_fifo.push_back(item.pts);
+                    did = true;
                 }
-
-                // Un frame por slot vencido mientras el encoder acepte entrada. Los duplicados
-                // (sin frame nuevo) salen como P-frames "skip": coste ínfimo. Nunca pasamos del
-                // slot actual, así que no alimentamos por delante del reloj.
-                while emitted < cur && need > 0 {
-                    let slot = emitted + 1;
-                    let pts = cfr_pts(slot, fps).max(emitted_pts + 1);
-                    let nv12 = match convert_frame(pipe, &src, pts) {
-                        Ok(Some(s)) => s,
-                        _ => break,
-                    };
-                    if feed_encoder_async(pipe, &nv12, buffer, &mut seq_grabbed, &mut pts_fifo) {
-                        pts_fifo.push_back(pts);
-                        need -= 1;
-                        emitted = slot;
-                        emitted_pts = pts;
-                    } else {
-                        break;
-                    }
-                }
+                need -= 1;
             }
 
-            std::thread::sleep(pace_sleep(interval));
+            // Sin trabajo (sin crédito o sin frames): cede la CPU brevemente para no girar.
+            if !did {
+                std::thread::sleep(Duration::from_millis(1));
+            }
         }
     }
 
@@ -2231,7 +2388,7 @@ mod win {
             }
 
             if foc.take_force_key() {
-                force_keyframe(pipe);
+                force_keyframe(&pipe.encoder);
             }
 
             if foc.minimized {
@@ -2298,14 +2455,14 @@ mod win {
                     break;
                 }
                 Err(e) if e.code() == MF_E_NOTACCEPTING => {
-                    let _ = drain_encoder_output(pipe, buffer, seq_grabbed, pts_fifo);
+                    let _ = drain_encoder_output(&pipe.encoder, buffer, seq_grabbed, pts_fifo);
                 }
                 Err(_) => break,
             }
         }
         if fed_ok {
             pts_fifo.push_back(pts);
-            let _ = drain_encoder_output(pipe, buffer, seq_grabbed, pts_fifo);
+            let _ = drain_encoder_output(&pipe.encoder, buffer, seq_grabbed, pts_fifo);
         }
     }
 
@@ -2406,8 +2563,8 @@ mod win {
     }
 
     // Pide al encoder que el siguiente frame de salida sea un IDR (best-effort vía ICodecAPI).
-    fn force_keyframe(pipe: &ReplayPipeline) {
-        if let Ok(codec) = pipe.encoder.cast::<ICodecAPI>() {
+    fn force_keyframe(enc: &IMFTransform) {
+        if let Ok(codec) = enc.cast::<ICodecAPI>() {
             let _ = unsafe { codec.SetValue(&CODECAPI_AVEncVideoForceKeyFrame, &variant_u32(1)) };
         }
     }
@@ -2512,7 +2669,7 @@ mod win {
     }
 
     fn drain_encoder_output(
-        pipe: &ReplayPipeline,
+        enc: &IMFTransform,
         buffer: &Arc<Mutex<ReplayBuffer>>,
         seq_grabbed: &mut bool,
         pts_fifo: &mut VecDeque<i64>,
@@ -2521,7 +2678,7 @@ mod win {
         loop {
             let mut out = MFT_OUTPUT_DATA_BUFFER::default();
             let mut status = 0u32;
-            let hr = unsafe { pipe.encoder.ProcessOutput(0, std::slice::from_mut(&mut out), &mut status) };
+            let hr = unsafe { enc.ProcessOutput(0, std::slice::from_mut(&mut out), &mut status) };
             match hr {
                 Ok(()) => {}
                 Err(e) if e.code() == MF_E_TRANSFORM_NEED_MORE_INPUT => break,
@@ -2529,7 +2686,7 @@ mod win {
             }
 
             if !*seq_grabbed {
-                if let Ok(mt) = unsafe { pipe.encoder.GetOutputCurrentType(0) } {
+                if let Ok(mt) = unsafe { enc.GetOutputCurrentType(0) } {
                     if let Some(h) = blob(&mt, &MF_MT_MPEG_SEQUENCE_HEADER) {
                         buffer.lock().unwrap().seq_header = h;
                         *seq_grabbed = true;
@@ -3002,6 +3159,14 @@ mod win {
         } else {
             10_000_000 / fps as i64
         }
+    }
+
+    // Profundidad de la cola entre el hilo de pacing y el del encoder: ~300 ms de frames.
+    // Es el margen que absorbe los stalls de ProcessInput de NVENC bajo carga de GPU sin
+    // congelar la cadencia; más allá se descartan frames sueltos (degradación suave). Se
+    // acota para limitar la VRAM del pool NV12 (crece con la resolución de salida).
+    fn enc_buffer_frames(fps: u32) -> usize {
+        ((fps as usize * 3 + 9) / 10).clamp(6, 24)
     }
 
     // PTS absoluto (en unidades de 100 ns) del slot CFR `n` a `fps`. No acumulado:
