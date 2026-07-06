@@ -50,8 +50,9 @@ function loadResolution(): number {
 }
 
 function loadMic(): boolean {
-  if (typeof localStorage === 'undefined') return false;
-  return localStorage.getItem(MIC_KEY) === '1';
+  if (typeof localStorage === 'undefined') return true;
+  const v = localStorage.getItem(MIC_KEY);
+  return v === null ? true : v === '1';
 }
 
 function loadMicDevice(): string {

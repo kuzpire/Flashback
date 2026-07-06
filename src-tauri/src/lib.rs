@@ -408,9 +408,17 @@ pub fn run() {
             config::allow_asset_scopes(app.handle());
             // Rich Presence de Discord: arranca el gestor con el valor persistido (off por defecto).
             discord::init(app.handle().clone(), config::get_discord_rpc(app.handle()));
+            // Arranque con el sistema: el instalador escribe la clave Run con `--autostart`.
+            // En ese caso la app abre directamente en la bandeja (el replay se arma solo en
+            // el webview oculto). En un arranque normal la ventana nace oculta (visible:false
+            // para no parpadear) y aquí se muestra.
+            let autostart = std::env::args().any(|a| a == "--autostart");
             if let Some(w) = app.get_webview_window("main") {
                 let _ = w.set_min_size(Some(tauri::LogicalSize { width: 1200.0, height: 675.0 }));
                 let _ = w.set_size(tauri::LogicalSize { width: 1200.0, height: 675.0 });
+                if !autostart {
+                    let _ = w.show();
+                }
             }
             if let Some(o) = app.get_webview_window("overlay") {
                 let _ = o.set_ignore_cursor_events(true);

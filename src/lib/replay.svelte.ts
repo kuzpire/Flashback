@@ -12,8 +12,9 @@ export const BUFFER_OPTIONS: { label: string; seconds: number }[] = [
 ];
 
 function loadEnabled(): boolean {
-  if (typeof localStorage === 'undefined') return false;
-  return localStorage.getItem(ENABLED_KEY) === '1';
+  if (typeof localStorage === 'undefined') return true;
+  const v = localStorage.getItem(ENABLED_KEY);
+  return v === null ? true : v === '1';
 }
 
 function loadSeconds(): number {

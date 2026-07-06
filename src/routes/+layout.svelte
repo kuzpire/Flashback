@@ -19,6 +19,8 @@
     setFps,
     setQuality,
     setResolution,
+    setMic,
+    setMicDevice,
     qualityLabel,
     resolutionLabel,
     estimatedClipSize,
@@ -57,9 +59,9 @@
   let selectedMonitor = $state<string | null>(null);
   let pickerOpen = $state(false);
   let recording = $state(false);
-  let micOn = $state(false);
+  let micOn = $state(captureConfig.mic);
   let audioInputs = $state<AudioInput[]>([]);
-  let micInput = $state('');
+  let micInput = $state(captureConfig.micDevice);
   let micDDOpen = $state(false);
   let settingsOpen = $state(false);
   let openRow = $state<string | null>(null);
@@ -151,6 +153,7 @@
       audioInputs = await invoke<AudioInput[]>('list_audio_inputs');
       if (!audioInputs.some((d) => d.id === micInput)) {
         micInput = audioInputs[0]?.id ?? '';
+        setMicDevice(micInput);
       }
     } catch {
       // fuera de Tauri (preview en navegador)
@@ -189,6 +192,7 @@
   function pickMic(e: MouseEvent, id: string) {
     e.stopPropagation();
     micInput = id;
+    setMicDevice(id);
     micDDOpen = false;
   }
 
@@ -534,6 +538,7 @@
               onclick={(e) => {
                 e.stopPropagation();
                 micOn = !micOn;
+                setMic(micOn);
               }}
             >
               <span class="opt-ico"><Icon name="mic" size={21} /></span>
