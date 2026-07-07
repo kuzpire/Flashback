@@ -59,7 +59,3 @@ Grab the latest installer from the [Releases](https://github.com/joshinyx/Flashb
 ## License
 
 GPL-3.0
-
-## About
-
-Built by [Josh Bernal](https://joshiny.dev).
