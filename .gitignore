@@ -47,3 +47,5 @@ CLAUDE.md
 *.mp4
 *.mkv
 *.mov
+
+/latest.json
