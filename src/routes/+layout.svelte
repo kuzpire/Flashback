@@ -32,6 +32,14 @@
   import { gameSettings, loadDisabledGames } from '$lib/games.svelte';
   import { displaySource } from '$lib/clips';
   import { t, initLocale } from '$lib/i18n.svelte';
+  import {
+    updater,
+    checkForUpdate,
+    maybeAutoShow,
+    openUpdatePopup,
+    closeUpdatePopup,
+    installUpdate
+  } from '$lib/updater.svelte';
 
   let { children } = $props();
 
@@ -429,6 +437,19 @@
       }
     })();
   });
+
+  // Chequeo de actualización ~4s tras montar. El popup solo se auto-muestra si la ventana
+  // está visible (arranque en bandeja: solo bolita, y al enfocar la ventana se muestra).
+  $effect(() => {
+    const timer = setTimeout(checkForUpdate, 4000);
+    const unlisten = getCurrentWindow().onFocusChanged(({ payload }) => {
+      if (payload) maybeAutoShow();
+    });
+    return () => {
+      clearTimeout(timer);
+      unlisten.then((u) => u());
+    };
+  });
 </script>
 
 <svelte:window onclick={closeAll} oncontextmenu={onContextMenu} />
@@ -436,7 +457,21 @@
 <div class="app">
   <aside class="sidebar" data-tauri-drag-region>
     <div class="logo" data-tauri-drag-region>
-      <img src="/flashback-mono.svg" alt="Flashback" />
+      {#if updater.available}
+        <button
+          class="logo-btn"
+          aria-label={t('upd.badgeLabel')}
+          onclick={(e) => {
+            e.stopPropagation();
+            openUpdatePopup();
+          }}
+        >
+          <img src="/flashback-mono.svg" alt="Flashback" />
+          <span class="upd-dot"></span>
+        </button>
+      {:else}
+        <img src="/flashback-mono.svg" alt="Flashback" />
+      {/if}
     </div>
 
     <nav>
@@ -705,6 +740,30 @@
   {#key editorState.clip.id}
     <Editor />
   {/key}
+{/if}
+
+{#if updater.popupOpen && updater.info}
+  <div class="upd-overlay" role="presentation" onclick={closeUpdatePopup}>
+    <div
+      class="upd-modal"
+      role="dialog"
+      aria-modal="true"
+      onclick={(e) => e.stopPropagation()}
+    >
+      <h2 class="upd-title">{t('upd.title')}</h2>
+      <p class="upd-ver">{t('upd.version', { v: updater.info.version })}</p>
+      {#if updater.info.notes}<p class="upd-notes">{updater.info.notes}</p>{/if}
+      {#if updater.installing}
+        <div class="upd-track"><div class="upd-fill" style:width={`${updater.progress}%`}></div></div>
+        <p class="upd-status">{t('upd.installing')}</p>
+      {:else}
+        <div class="upd-actions">
+          <button class="upd-btn ghost" onclick={closeUpdatePopup}>{t('upd.cancel')}</button>
+          <button class="upd-btn primary" onclick={installUpdate}>{t('upd.update')}</button>
+        </div>
+      {/if}
+    </div>
+  </div>
 {/if}
 
 <style>
@@ -1519,5 +1578,110 @@
     overflow-y: auto;
     overflow-x: hidden;
     border-left: 1px solid var(--line);
+  }
+
+  .logo-btn {
+    position: relative;
+    display: grid;
+    place-items: center;
+    background: none;
+    border: 0;
+    padding: 0;
+    cursor: pointer;
+  }
+  .upd-dot {
+    position: absolute;
+    top: -2px;
+    right: -2px;
+    width: 9px;
+    height: 9px;
+    border-radius: 999px;
+    background: var(--accent);
+    box-shadow: 0 0 0 2px #080808;
+  }
+
+  .upd-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 200;
+    display: grid;
+    place-items: center;
+    background: rgba(0, 0, 0, 0.6);
+  }
+  .upd-modal {
+    width: 380px;
+    max-width: calc(100vw - 40px);
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 22px;
+    background: var(--bg-1);
+    border: 1px solid var(--line-strong);
+    border-radius: var(--r-md);
+    box-shadow: 0 24px 60px -18px rgba(0, 0, 0, 0.8);
+  }
+  .upd-title {
+    font-size: 17px;
+    font-weight: 640;
+    color: var(--text-0);
+  }
+  .upd-ver {
+    font-size: 13px;
+    color: var(--text-1);
+  }
+  .upd-notes {
+    max-height: 160px;
+    overflow-y: auto;
+    font-size: 12.5px;
+    line-height: 1.4;
+    color: var(--text-2);
+    white-space: pre-wrap;
+  }
+  .upd-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 6px;
+  }
+  .upd-btn {
+    padding: 9px 16px;
+    font-size: 13px;
+    border-radius: var(--r-sm);
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+  }
+  .upd-btn.ghost {
+    color: var(--text-1);
+    background: transparent;
+    border: 1px solid var(--line);
+  }
+  .upd-btn.ghost:hover {
+    color: var(--text-0);
+    border-color: var(--line-strong);
+  }
+  .upd-btn.primary {
+    color: var(--on-accent);
+    background: var(--accent);
+    border: 1px solid transparent;
+    font-weight: 560;
+  }
+  .upd-btn.primary:hover {
+    background: var(--accent-deep);
+  }
+  .upd-track {
+    height: 7px;
+    margin-top: 6px;
+    border-radius: 999px;
+    background: var(--bg-3);
+    overflow: hidden;
+  }
+  .upd-fill {
+    height: 100%;
+    background: var(--accent);
+    transition: width 0.15s ease;
+  }
+  .upd-status {
+    font-size: 12px;
+    color: var(--text-2);
   }
 </style>
