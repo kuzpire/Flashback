@@ -16,6 +16,8 @@
     "core:window:allow-set-focus",
     "opener:default",
     "opener:allow-reveal-item-in-dir",
+    "updater:default",
+    "process:allow-restart",
     "global-shortcut:allow-register",
     "global-shortcut:allow-unregister",
     "global-shortcut:allow-unregister-all",
