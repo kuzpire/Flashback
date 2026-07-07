@@ -262,7 +262,13 @@ const en: Record<string, string> = {
   'time.monthAgo': '1 month ago',
   'time.monthsAgo': '{n} months ago',
   'time.yearAgo': '1 year ago',
-  'time.yearsAgo': '{n} years ago'
+  'time.yearsAgo': '{n} years ago',
+  'upd.title': 'Update available',
+  'upd.version': 'Version {v} is ready to install.',
+  'upd.update': 'Update',
+  'upd.cancel': 'Cancel',
+  'upd.installing': 'Downloading and installing…',
+  'upd.badgeLabel': 'Update available'
 };
 
 const es: Record<string, string> = {
@@ -470,7 +476,13 @@ const es: Record<string, string> = {
   'time.monthAgo': 'Hace 1 mes',
   'time.monthsAgo': 'Hace {n} meses',
   'time.yearAgo': 'Hace 1 año',
-  'time.yearsAgo': 'Hace {n} años'
+  'time.yearsAgo': 'Hace {n} años',
+  'upd.title': 'Actualización disponible',
+  'upd.version': 'La versión {v} está lista para instalar.',
+  'upd.update': 'Actualizar',
+  'upd.cancel': 'Cancelar',
+  'upd.installing': 'Descargando e instalando…',
+  'upd.badgeLabel': 'Actualización disponible'
 };
 
 const messages: Record<Locale, Record<string, string>> = { en, es };
