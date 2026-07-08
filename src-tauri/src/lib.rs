@@ -11,6 +11,8 @@ mod library;
 #[cfg(target_os = "windows")]
 mod overlay;
 mod thumbnail;
+#[cfg(target_os = "windows")]
+mod toast;
 
 #[tauri::command]
 async fn game_hero(
@@ -326,54 +328,39 @@ fn edit_dest(app: tauri::AppHandle, src: String) -> String {
         .into_owned()
 }
 
-#[derive(Clone, serde::Serialize)]
+#[derive(serde::Deserialize)]
 struct ToastPayload {
-    text: String,
+    title: String,
+    body: String,
+    #[serde(default)]
+    keys: Vec<String>,
     kind: String,
 }
 
-// Muestra el toast en la ventana overlay (transparente, siempre encima, click-through). La
-// ventana permanece oculta entre avisos (una ventana transparente vacía se compone gris en
-// Windows) y se muestra solo durante el toast. Es no-activable (set_focusable(false) en el
-// setup), así que show() no le roba el foco al juego. Se reposiciona arriba-derecha del
-// monitor primario por si cambió la resolución/escala. El overlay la oculta al terminar.
+#[cfg(target_os = "windows")]
 #[tauri::command]
-fn toast(app: tauri::AppHandle, text: String, kind: String) -> Result<(), String> {
-    use tauri::{Emitter, Manager};
-    let w = app
-        .get_webview_window("overlay")
-        .ok_or("overlay window missing")?;
-    if let Ok(Some(mon)) = w.primary_monitor() {
-        let mpos = mon.position();
-        let msize = mon.size();
-        let scale = mon.scale_factor();
-        let margin = (16.0 * scale) as i32;
-        if let Ok(size) = w.outer_size() {
-            // Lengüeta anclada al borde derecho: pegada a la derecha (x sin margen), con un
-            // pequeño margen arriba.
-            let x = mpos.x + msize.width as i32 - size.width as i32;
-            let y = mpos.y + margin;
-            let _ = w.set_position(tauri::PhysicalPosition { x, y });
-        }
-    }
-    // Contenido primero (el webview oculto sigue ejecutando JS), luego mostrar: así nunca se
-    // ve la ventana transparente vacía (gris) antes de pintar el toast.
-    app.emit_to("overlay", "show-toast", ToastPayload { text, kind })
-        .map_err(|e| e.to_string())?;
-    let _ = w.show();
-    // Reafirmar topmost en cada toast: así se coloca por encima de juegos en ventana o
-    // borderless. No activa la ventana (es no-focusable), así que no le roba el foco.
-    let _ = w.set_always_on_top(true);
-    Ok(())
+fn toast(toast: tauri::State<'_, toast::Toast>, payload: ToastPayload) {
+    toast.show(toast::ToastData {
+        title: payload.title,
+        body: payload.body,
+        keys: payload.keys,
+        kind: toast::ToastKind::from_str(&payload.kind),
+    });
 }
 
+#[cfg(not(target_os = "windows"))]
 #[tauri::command]
-fn dismiss_toast(app: tauri::AppHandle) {
-    use tauri::Manager;
-    if let Some(w) = app.get_webview_window("overlay") {
-        let _ = w.hide();
-    }
+fn toast(_payload: ToastPayload) {}
+
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn dismiss_toast(toast: tauri::State<'_, toast::Toast>) {
+    toast.hide();
 }
+
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+fn dismiss_toast() {}
 
 // Trae la ventana principal al frente (desde la bandeja o el atajo de abrir).
 fn show_main(app: &tauri::AppHandle) {
@@ -422,11 +409,8 @@ pub fn run() {
                     let _ = w.show();
                 }
             }
-            if let Some(o) = app.get_webview_window("overlay") {
-                let _ = o.set_ignore_cursor_events(true);
-                // No-activable: al mostrarse durante un toast no debe robar el foco al juego.
-                let _ = o.set_focusable(false);
-            }
+            #[cfg(target_os = "windows")]
+            app.manage(toast::Toast::spawn());
 
             // Bandeja del sistema. Doble clic izquierdo abre la app; clic derecho abre el
             // menú con "Abrir Flashback" y "Cerrar". El replay sigue corriendo aunque la

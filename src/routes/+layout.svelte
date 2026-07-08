@@ -141,8 +141,8 @@
   // El feedback se muestra como toast en una ventana overlay (transparente, siempre
   // encima, click-through) para que sea visible también sobre el juego en modo Aplicación.
   type ToastKind = 'info' | 'ready' | 'saved' | 'error';
-  function toast(text: string, kind: ToastKind = 'info') {
-    invoke('toast', { text, kind }).catch(() => {});
+  function toast(text: string, kind: ToastKind = 'info', keys: string[] = []) {
+    invoke('toast', { payload: { title: 'Flashback', body: text, keys, kind } }).catch(() => {});
   }
 
   const activeMonitor = $derived(monitors.find((m) => m.id === selectedMonitor) ?? null);
