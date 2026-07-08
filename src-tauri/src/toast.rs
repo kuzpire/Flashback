@@ -27,7 +27,8 @@ mod win {
         DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, DWRITE_FACTORY_TYPE_SHARED,
         DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_NORMAL,
         DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_MEASURING_MODE_NATURAL,
-        DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_METRICS,
+        DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_CENTER,
+        DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_METRICS,
     };
     use windows::Win32::Graphics::DirectComposition::{
         DCompositionCreateDevice, IDCompositionDevice, IDCompositionSurface, IDCompositionTarget,
@@ -101,6 +102,22 @@ mod win {
     const BODY_LINE: f32 = 20.0;
 
     const MARK_SVG: &str = include_str!("../../static/flashback-mono.svg");
+
+    type Rect = D2D_RECT_F;
+
+    fn keycap_layout(key_widths: &[f32], plus_width: f32, gap: f32, pad_x: f32) -> (Vec<Rect>, f32) {
+        let mut rects = Vec::with_capacity(key_widths.len());
+        let mut x = 0.0f32;
+        for (i, kw) in key_widths.iter().enumerate() {
+            if i > 0 {
+                x += gap + plus_width + gap;
+            }
+            let chip_w = kw + pad_x * 2.0;
+            rects.push(Rect { left: x, top: 0.0, right: x + chip_w, bottom: 0.0 });
+            x += chip_w;
+        }
+        (rects, x)
+    }
 
     thread_local! {
         static RENDERER: RefCell<Option<Renderer>> = const { RefCell::new(None) };
@@ -184,8 +201,11 @@ mod win {
         dwrite: IDWriteFactory,
         title_format: IDWriteTextFormat,
         body_format: IDWriteTextFormat,
+        chip_format: IDWriteTextFormat,
         text_bright: ID2D1SolidColorBrush,
         text_dim: ID2D1SolidColorBrush,
+        chip_bg: ID2D1SolidColorBrush,
+        chip_text: ID2D1SolidColorBrush,
         mark: ID2D1Bitmap1,
         dcomp: IDCompositionDevice,
         _target: IDCompositionTarget,
@@ -248,6 +268,17 @@ mod win {
             )?;
             body_format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING)?;
             body_format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+            let chip_format = dwrite.CreateTextFormat(
+                w!("Segoe UI"),
+                None,
+                DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                11.5,
+                w!("en-us"),
+            )?;
+            chip_format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
+            chip_format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
 
             let text_bright = ctx.CreateSolidColorBrush(
                 &D2D1_COLOR_F {
@@ -267,6 +298,24 @@ mod win {
                 },
                 None,
             )?;
+            let chip_bg = ctx.CreateSolidColorBrush(
+                &D2D1_COLOR_F {
+                    r: 0x2a as f32 / 255.0,
+                    g: 0x2a as f32 / 255.0,
+                    b: 0x30 as f32 / 255.0,
+                    a: 1.0,
+                },
+                None,
+            )?;
+            let chip_text = ctx.CreateSolidColorBrush(
+                &D2D1_COLOR_F {
+                    r: 0xf0 as f32 / 255.0,
+                    g: 0xf2 as f32 / 255.0,
+                    b: 0xf7 as f32 / 255.0,
+                    a: 0.85,
+                },
+                None,
+            )?;
 
             let mark = load_mark(&ctx, monitor_scale(primary_monitor()))?;
 
@@ -283,8 +332,11 @@ mod win {
                 dwrite,
                 title_format,
                 body_format,
+                chip_format,
                 text_bright,
                 text_dim,
+                chip_bg,
+                chip_text,
                 mark,
                 dcomp,
                 _target: target,
@@ -390,12 +442,6 @@ mod win {
                     right,
                     bottom: oy + (TITLE_TOP + TITLE_LINE) * scale,
                 };
-                let body_rect = D2D_RECT_F {
-                    left: text_left,
-                    top: oy + BODY_TOP * scale,
-                    right,
-                    bottom: oy + (BODY_TOP + BODY_LINE) * scale,
-                };
                 self.ctx.DrawText(
                     &title,
                     &self.title_format,
@@ -404,6 +450,77 @@ mod win {
                     D2D1_DRAW_TEXT_OPTIONS_NONE,
                     DWRITE_MEASURING_MODE_NATURAL,
                 );
+
+                let mut body_left = text_left;
+                if !data.keys.is_empty() {
+                    let gap = 4.0 * scale;
+                    let pad_x = 7.0 * scale;
+                    let chip_h = 18.0 * scale;
+                    let chip_radius = 4.0 * scale;
+                    let center_y = oy + (BODY_TOP + BODY_LINE / 2.0) * scale;
+                    let plus: Vec<u16> = "+".encode_utf16().collect();
+                    let plus_w = self.line_width(&plus, &self.body_format);
+                    let key_widths: Vec<f32> = data
+                        .keys
+                        .iter()
+                        .map(|k| {
+                            let u: Vec<u16> = k.encode_utf16().collect();
+                            self.line_width(&u, &self.chip_format)
+                        })
+                        .collect();
+                    let (rects, keys_block_width) =
+                        keycap_layout(&key_widths, plus_w, gap, pad_x);
+                    for (i, r) in rects.iter().enumerate() {
+                        let cl = text_left + r.left;
+                        let cr = text_left + r.right;
+                        let chip_rect = D2D_RECT_F {
+                            left: cl,
+                            top: center_y - chip_h / 2.0,
+                            right: cr,
+                            bottom: center_y + chip_h / 2.0,
+                        };
+                        let chip = D2D1_ROUNDED_RECT {
+                            rect: chip_rect,
+                            radiusX: chip_radius,
+                            radiusY: chip_radius,
+                        };
+                        self.ctx.FillRoundedRectangle(&chip, &self.chip_bg);
+                        let key_u: Vec<u16> = data.keys[i].encode_utf16().collect();
+                        self.ctx.DrawText(
+                            &key_u,
+                            &self.chip_format,
+                            &chip_rect,
+                            &self.chip_text,
+                            D2D1_DRAW_TEXT_OPTIONS_NONE,
+                            DWRITE_MEASURING_MODE_NATURAL,
+                        );
+                        if i + 1 < rects.len() {
+                            let plus_left = cr + gap;
+                            let plus_rect = D2D_RECT_F {
+                                left: plus_left,
+                                top: oy + BODY_TOP * scale,
+                                right: plus_left + plus_w,
+                                bottom: oy + (BODY_TOP + BODY_LINE) * scale,
+                            };
+                            self.ctx.DrawText(
+                                &plus,
+                                &self.body_format,
+                                &plus_rect,
+                                &self.text_dim,
+                                D2D1_DRAW_TEXT_OPTIONS_NONE,
+                                DWRITE_MEASURING_MODE_NATURAL,
+                            );
+                        }
+                    }
+                    body_left = text_left + keys_block_width + gap;
+                }
+
+                let body_rect = D2D_RECT_F {
+                    left: body_left,
+                    top: oy + BODY_TOP * scale,
+                    right,
+                    bottom: oy + (BODY_TOP + BODY_LINE) * scale,
+                };
                 self.ctx.DrawText(
                     &body,
                     &self.body_format,
@@ -438,9 +555,30 @@ mod win {
         unsafe fn measure(&self, data: &ToastData, scale: f32) -> (f32, f32) {
             let title: Vec<u16> = data.title.encode_utf16().collect();
             let body: Vec<u16> = data.body.encode_utf16().collect();
-            let line = self
-                .line_width(&title, &self.title_format)
-                .max(self.line_width(&body, &self.body_format));
+            let title_w = self.line_width(&title, &self.title_format);
+            let body_w = self.line_width(&body, &self.body_format);
+
+            let second_line = if data.keys.is_empty() {
+                body_w
+            } else {
+                let gap = 4.0 * scale;
+                let pad_x = 7.0 * scale;
+                let plus: Vec<u16> = "+".encode_utf16().collect();
+                let plus_w = self.line_width(&plus, &self.body_format);
+                let key_widths: Vec<f32> = data
+                    .keys
+                    .iter()
+                    .map(|k| {
+                        let u: Vec<u16> = k.encode_utf16().collect();
+                        self.line_width(&u, &self.chip_format)
+                    })
+                    .collect();
+                let (_rects, keys_block_width) =
+                    keycap_layout(&key_widths, plus_w, gap, pad_x);
+                keys_block_width + gap + body_w
+            };
+
+            let line = title_w.max(second_line);
             let width = TEXT_LEFT + line + RIGHT_PAD;
             (width * scale, TAB_H * scale)
         }
@@ -619,6 +757,21 @@ mod win {
             assert_eq!(ToastKind::from_str("ready"), ToastKind::Ready);
             assert_eq!(ToastKind::from_str("saved"), ToastKind::Saved);
             assert_eq!(ToastKind::from_str("nonsense"), ToastKind::Info);
+        }
+
+        #[test]
+        fn keycap_layout_positions_chips_with_plus_separators() {
+            // two keys of width 30 and 20, plus glyph width 10, gap 6, chip horizontal pad 8
+            let (rects, total) = keycap_layout(&[30.0, 20.0], 10.0, 6.0, 8.0);
+            assert_eq!(rects.len(), 2);
+            // first chip starts at 0, width = 30 + 2*8 = 46
+            assert!((rects[0].left - 0.0).abs() < 0.01);
+            assert!((rects[0].right - 46.0).abs() < 0.01);
+            // gap, plus(10), gap before second chip: 46 + 6 + 10 + 6 = 68
+            assert!((rects[1].left - 68.0).abs() < 0.01);
+            // second chip width = 20 + 16 = 36 -> right = 104
+            assert!((rects[1].right - 104.0).abs() < 0.01);
+            assert!((total - 104.0).abs() < 0.01);
         }
     }
 }
