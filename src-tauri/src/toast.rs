@@ -6,6 +6,7 @@ mod win {
     use std::cell::RefCell;
     use std::sync::mpsc::{self, Receiver, Sender};
     use std::thread;
+    use std::time::{Duration, Instant};
 
     use windows::core::{w, Interface, Result};
     use windows::Win32::Foundation::{HMODULE, HWND, LPARAM, LRESULT, POINT, WPARAM};
@@ -90,7 +91,24 @@ mod win {
 
     const WM_APP_WAKE: u32 = WM_APP + 1;
     const TIMER_ID: usize = 1;
-    const HIDE_MS: u32 = 2800;
+    const FRAME_MS: u32 = 16;
+    const IN_MS: u64 = 220;
+    const OUT_MS: u64 = 300;
+    const VISIBLE_MS: u64 = 2800;
+    const SLIDE: f32 = 24.0;
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum Phase {
+        Hidden,
+        In,
+        Visible,
+        Out,
+    }
+
+    fn ease_out(p: f32) -> f32 {
+        1.0 - (1.0 - p).powi(3)
+    }
+
     const TAB_H: f32 = 76.0;
     const CORNER: f32 = 8.0;
     const TOP_MARGIN: f32 = 12.0;
@@ -214,6 +232,12 @@ mod win {
         surf_w: u32,
         surf_h: u32,
         data: Option<ToastData>,
+        phase: Phase,
+        start: Instant,
+        deadline: Instant,
+        cur_w: u32,
+        cur_h: u32,
+        cur_scale: f32,
     }
 
     impl Renderer {
@@ -345,6 +369,12 @@ mod win {
                 surf_w: 0,
                 surf_h: 0,
                 data: None,
+                phase: Phase::Hidden,
+                start: Instant::now(),
+                deadline: Instant::now(),
+                cur_w: 0,
+                cur_h: 0,
+                cur_scale: 1.0,
             })
         }
 
@@ -370,9 +400,15 @@ mod win {
         // que sumar a las coordenadas de dibujo. El rectángulo se extiende `radius` más a la
         // derecha del ancho real para que DComp recorte las esquinas derechas y solo queden
         // redondeadas las de la izquierda.
-        unsafe fn render(&mut self, w: u32, h: u32, scale: f32) -> Result<()> {
+        unsafe fn render(&mut self, w: u32, h: u32, scale: f32, opacity: f32) -> Result<()> {
             self.ensure_surface(w, h)?;
             let radius = CORNER * scale;
+
+            self.brush.SetOpacity(opacity);
+            self.text_bright.SetOpacity(opacity);
+            self.text_dim.SetOpacity(opacity);
+            self.chip_bg.SetOpacity(opacity);
+            self.chip_text.SetOpacity(opacity);
 
             let surface = self.surface.as_ref().unwrap();
             let mut offset = POINT::default();
@@ -425,7 +461,7 @@ mod win {
             self.ctx.DrawBitmap(
                 &self.mark,
                 Some(&mark_rect),
-                1.0,
+                opacity,
                 D2D1_INTERPOLATION_MODE_LINEAR,
                 None,
                 None,
@@ -587,11 +623,18 @@ mod win {
             let mon = primary_monitor();
             let scale = monitor_scale(mon);
             let (fw, fh) = self.measure(&data, scale);
-            let w = fw.round() as i32;
-            let h = fh.round() as i32;
+            let w = fw.round() as u32;
+            let h = fh.round() as u32;
             self.data = Some(data);
-            place(self.hwnd, w, h, scale);
-            if self.render(w as u32, h as u32, scale).is_err() {
+            place(self.hwnd, w as i32, h as i32, scale);
+            self.cur_w = w;
+            self.cur_h = h;
+            self.cur_scale = scale;
+            self.phase = Phase::In;
+            self.start = Instant::now();
+            self.deadline = self.start + Duration::from_millis(VISIBLE_MS);
+            let _ = self.visual.SetOffsetX2(SLIDE * scale);
+            if self.render(w, h, scale, 0.0).is_err() {
                 return;
             }
             let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
@@ -604,12 +647,53 @@ mod win {
                 0,
                 SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE,
             );
-            SetTimer(Some(self.hwnd), TIMER_ID, HIDE_MS, None);
+            SetTimer(Some(self.hwnd), TIMER_ID, FRAME_MS, None);
         }
 
-        unsafe fn hide(&self) {
-            let _ = KillTimer(Some(self.hwnd), TIMER_ID);
-            let _ = ShowWindow(self.hwnd, SW_HIDE);
+        // Cierre suave: si el toast está a la vista, arranca la fase Out en lugar de
+        // ocultarlo de golpe; el timer de animación completa el fundido.
+        unsafe fn hide(&mut self) {
+            if self.phase == Phase::In || self.phase == Phase::Visible {
+                self.phase = Phase::Out;
+                self.start = Instant::now();
+            }
+        }
+
+        unsafe fn tick(&mut self) {
+            let scale = self.cur_scale;
+            let (w, h) = (self.cur_w, self.cur_h);
+            let elapsed = self.start.elapsed().as_secs_f32() * 1000.0;
+            match self.phase {
+                Phase::In => {
+                    let p = (elapsed / IN_MS as f32).clamp(0.0, 1.0);
+                    let t = ease_out(p);
+                    let _ = self.visual.SetOffsetX2((1.0 - t) * SLIDE * scale);
+                    let _ = self.render(w, h, scale, t);
+                    if p >= 1.0 {
+                        self.phase = Phase::Visible;
+                    }
+                }
+                Phase::Visible => {
+                    if Instant::now() >= self.deadline {
+                        self.phase = Phase::Out;
+                        self.start = Instant::now();
+                    }
+                }
+                Phase::Out => {
+                    let p = (elapsed / OUT_MS as f32).clamp(0.0, 1.0);
+                    let t = ease_out(p);
+                    let _ = self.visual.SetOffsetX2(t * SLIDE * scale);
+                    let _ = self.render(w, h, scale, 1.0 - t);
+                    if p >= 1.0 {
+                        let _ = ShowWindow(self.hwnd, SW_HIDE);
+                        let _ = KillTimer(Some(self.hwnd), TIMER_ID);
+                        self.phase = Phase::Hidden;
+                    }
+                }
+                Phase::Hidden => {
+                    let _ = KillTimer(Some(self.hwnd), TIMER_ID);
+                }
+            }
         }
     }
 
@@ -733,8 +817,8 @@ mod win {
             }
             WM_TIMER => {
                 RENDERER.with(|r| {
-                    if let Some(rend) = r.borrow().as_ref() {
-                        rend.hide();
+                    if let Some(rend) = r.borrow_mut().as_mut() {
+                        rend.tick();
                     }
                 });
                 LRESULT(0)
@@ -757,6 +841,12 @@ mod win {
             assert_eq!(ToastKind::from_str("ready"), ToastKind::Ready);
             assert_eq!(ToastKind::from_str("saved"), ToastKind::Saved);
             assert_eq!(ToastKind::from_str("nonsense"), ToastKind::Info);
+        }
+
+        #[test]
+        fn ease_out_hits_endpoints() {
+            assert_eq!(ease_out(0.0), 0.0);
+            assert_eq!(ease_out(1.0), 1.0);
         }
 
         #[test]
