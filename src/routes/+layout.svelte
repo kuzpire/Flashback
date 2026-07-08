@@ -8,7 +8,7 @@
   import { invoke } from '@tauri-apps/api/core';
   import { register, unregisterAll } from '@tauri-apps/plugin-global-shortcut';
   import { getCurrentWindow } from '@tauri-apps/api/window';
-  import { hotkeys, capture, labelFor } from '$lib/hotkeys.svelte';
+  import { hotkeys, capture, labelFor, labelTokens } from '$lib/hotkeys.svelte';
   import { refreshLibrary } from '$lib/library.svelte';
   import { replay, setReplaySeconds, BUFFER_OPTIONS } from '$lib/replay.svelte';
   import { playReplaySound } from '$lib/replay-sound.svelte';
@@ -429,7 +429,7 @@
         await invoke('stop_replay');
         if (key !== 'off') {
           await invoke('start_replay', { target, seconds, fps, quality, resolution, bitrate, mic, micDevice });
-          if (wasOff) toast(t('toast.replayReady'), 'ready');
+          if (wasOff) toast(t('toast.replayReadyHint'), 'ready', labelTokens(hotkeys.saveReplay));
         }
       } catch (e) {
         toast(t('toast.replayStartFailed', { e: String(e) }), 'error');
