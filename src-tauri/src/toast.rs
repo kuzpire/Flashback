@@ -222,6 +222,7 @@ mod win {
         chip_format: IDWriteTextFormat,
         text_bright: ID2D1SolidColorBrush,
         text_dim: ID2D1SolidColorBrush,
+        title_error: ID2D1SolidColorBrush,
         chip_bg: ID2D1SolidColorBrush,
         chip_text: ID2D1SolidColorBrush,
         mark: ID2D1Bitmap1,
@@ -322,6 +323,15 @@ mod win {
                 },
                 None,
             )?;
+            let title_error = ctx.CreateSolidColorBrush(
+                &D2D1_COLOR_F {
+                    r: 0xff as f32 / 255.0,
+                    g: 0x5b as f32 / 255.0,
+                    b: 0x5b as f32 / 255.0,
+                    a: 1.0,
+                },
+                None,
+            )?;
             let chip_bg = ctx.CreateSolidColorBrush(
                 &D2D1_COLOR_F {
                     r: 0x2a as f32 / 255.0,
@@ -359,6 +369,7 @@ mod win {
                 chip_format,
                 text_bright,
                 text_dim,
+                title_error,
                 chip_bg,
                 chip_text,
                 mark,
@@ -407,6 +418,7 @@ mod win {
             self.brush.SetOpacity(opacity);
             self.text_bright.SetOpacity(opacity);
             self.text_dim.SetOpacity(opacity);
+            self.title_error.SetOpacity(opacity);
             self.chip_bg.SetOpacity(opacity);
             self.chip_text.SetOpacity(opacity);
 
@@ -478,11 +490,16 @@ mod win {
                     right,
                     bottom: oy + (TITLE_TOP + TITLE_LINE) * scale,
                 };
+                let title_brush = if data.kind == ToastKind::Error {
+                    &self.title_error
+                } else {
+                    &self.text_bright
+                };
                 self.ctx.DrawText(
                     &title,
                     &self.title_format,
                     &title_rect,
-                    &self.text_bright,
+                    title_brush,
                     D2D1_DRAW_TEXT_OPTIONS_NONE,
                     DWRITE_MEASURING_MODE_NATURAL,
                 );
