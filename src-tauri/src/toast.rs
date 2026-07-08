@@ -716,7 +716,13 @@ mod win {
         let factory: IWICImagingFactory =
             CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)?;
         let wic_stream = factory.CreateStream()?;
-        wic_stream.InitializeFromMemory(MARK_SVG.as_bytes())?;
+        // ID2D1SvgDocument respeta el width/height explícito del <svg> raíz (1024) en vez de
+        // ajustar el viewBox al viewport de CreateSvgDocument, así que con ambos presentes no
+        // cae nada dentro del viewport pequeño. Sin width/height, el viewBox escala al viewport.
+        let svg_data = MARK_SVG
+            .replace(" width=\"1024\"", "")
+            .replace(" height=\"1024\"", "");
+        wic_stream.InitializeFromMemory(svg_data.as_bytes())?;
         let stream: IStream = wic_stream.cast()?;
 
         let ctx5: ID2D1DeviceContext5 = ctx.cast()?;
