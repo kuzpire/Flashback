@@ -12,10 +12,12 @@ mod win {
     use windows::Win32::Graphics::Direct2D::Common::{
         D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_PIXEL_FORMAT, D2D_RECT_F,
     };
+    use windows::Win32::Graphics::Direct2D::Common::{D2D_SIZE_F, D2D_SIZE_U};
     use windows::Win32::Graphics::Direct2D::{
-        D2D1CreateDevice, ID2D1DeviceContext, ID2D1SolidColorBrush, D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
-        D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1, D2D1_DEVICE_CONTEXT_OPTIONS_NONE,
-        D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ROUNDED_RECT,
+        D2D1CreateDevice, ID2D1Bitmap1, ID2D1DeviceContext, ID2D1DeviceContext5,
+        ID2D1SolidColorBrush, D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_TARGET,
+        D2D1_BITMAP_PROPERTIES1, D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_NONE,
+        D2D1_INTERPOLATION_MODE_LINEAR, D2D1_ROUNDED_RECT,
     };
     use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
     use windows::Win32::Graphics::Direct3D11::{
@@ -35,6 +37,10 @@ mod win {
         DXGI_ALPHA_MODE_PREMULTIPLIED, DXGI_FORMAT_B8G8R8A8_UNORM,
     };
     use windows::Win32::Graphics::Dxgi::{IDXGIDevice, IDXGISurface};
+    use windows::Win32::Graphics::Imaging::{CLSID_WICImagingFactory, IWICImagingFactory};
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, IStream, CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
+    };
     use windows::Win32::Graphics::Gdi::{
         GetMonitorInfoW, MonitorFromPoint, HMONITOR, MONITORINFO, MONITOR_DEFAULTTOPRIMARY,
     };
@@ -94,6 +100,8 @@ mod win {
     const BODY_TOP: f32 = 39.0;
     const BODY_LINE: f32 = 20.0;
 
+    const MARK_SVG: &str = include_str!("../../static/flashback-mono.svg");
+
     thread_local! {
         static RENDERER: RefCell<Option<Renderer>> = const { RefCell::new(None) };
         static RX: RefCell<Option<Receiver<Cmd>>> = const { RefCell::new(None) };
@@ -110,6 +118,7 @@ mod win {
             let (hwnd_tx, hwnd_rx) = mpsc::channel::<isize>();
 
             thread::spawn(move || unsafe {
+                let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
                 let hwnd = match create_window() {
                     Ok(h) => h,
                     Err(_) => {
@@ -177,6 +186,7 @@ mod win {
         body_format: IDWriteTextFormat,
         text_bright: ID2D1SolidColorBrush,
         text_dim: ID2D1SolidColorBrush,
+        mark: ID2D1Bitmap1,
         dcomp: IDCompositionDevice,
         _target: IDCompositionTarget,
         visual: IDCompositionVisual,
@@ -258,6 +268,8 @@ mod win {
                 None,
             )?;
 
+            let mark = load_mark(&ctx, monitor_scale(primary_monitor()))?;
+
             let dcomp: IDCompositionDevice = DCompositionCreateDevice(&dxgi)?;
             let target = dcomp.CreateTargetForHwnd(hwnd, true)?;
             let visual = dcomp.CreateVisual()?;
@@ -273,6 +285,7 @@ mod win {
                 body_format,
                 text_bright,
                 text_dim,
+                mark,
                 dcomp,
                 _target: target,
                 visual,
@@ -347,6 +360,24 @@ mod win {
                 a: 0.0,
             }));
             self.ctx.FillRoundedRectangle(&rect, &self.brush);
+
+            let mark_size = 28.0 * scale;
+            let mark_left = ox + 12.0 * scale;
+            let mark_top = oy + (h as f32 - mark_size) / 2.0;
+            let mark_rect = D2D_RECT_F {
+                left: mark_left,
+                top: mark_top,
+                right: mark_left + mark_size,
+                bottom: mark_top + mark_size,
+            };
+            self.ctx.DrawBitmap(
+                &self.mark,
+                Some(&mark_rect),
+                1.0,
+                D2D1_INTERPOLATION_MODE_LINEAR,
+                None,
+                None,
+            );
 
             if let Some(data) = self.data.as_ref() {
                 let text_left = ox + TEXT_LEFT * scale;
@@ -442,6 +473,43 @@ mod win {
             let _ = KillTimer(Some(self.hwnd), TIMER_ID);
             let _ = ShowWindow(self.hwnd, SW_HIDE);
         }
+    }
+
+    unsafe fn load_mark(ctx: &ID2D1DeviceContext, scale: f32) -> Result<ID2D1Bitmap1> {
+        let factory: IWICImagingFactory =
+            CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)?;
+        let wic_stream = factory.CreateStream()?;
+        wic_stream.InitializeFromMemory(MARK_SVG.as_bytes())?;
+        let stream: IStream = wic_stream.cast()?;
+
+        let ctx5: ID2D1DeviceContext5 = ctx.cast()?;
+        let size = 32.0 * scale;
+        let px = size.round() as u32;
+        let props = D2D1_BITMAP_PROPERTIES1 {
+            pixelFormat: D2D1_PIXEL_FORMAT {
+                format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+            },
+            dpiX: 96.0,
+            dpiY: 96.0,
+            bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET,
+            ..Default::default()
+        };
+        let mark = ctx.CreateBitmap(D2D_SIZE_U { width: px, height: px }, None, 0, &props)?;
+        let svg = ctx5.CreateSvgDocument(&stream, D2D_SIZE_F { width: size, height: size })?;
+
+        ctx.SetTarget(&mark);
+        ctx.BeginDraw();
+        ctx.Clear(Some(&D2D1_COLOR_F {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 0.0,
+        }));
+        ctx5.DrawSvgDocument(&svg);
+        ctx.EndDraw(None, None)?;
+        ctx.SetTarget(None);
+        Ok(mark)
     }
 
     unsafe fn create_window() -> Result<HWND> {
