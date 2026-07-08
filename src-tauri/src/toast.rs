@@ -15,11 +15,17 @@ mod win {
     use windows::Win32::Graphics::Direct2D::{
         D2D1CreateDevice, ID2D1DeviceContext, ID2D1SolidColorBrush, D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
         D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1, D2D1_DEVICE_CONTEXT_OPTIONS_NONE,
-        D2D1_ROUNDED_RECT,
+        D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ROUNDED_RECT,
     };
     use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
     use windows::Win32::Graphics::Direct3D11::{
         D3D11CreateDevice, ID3D11Device, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION,
+    };
+    use windows::Win32::Graphics::DirectWrite::{
+        DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, DWRITE_FACTORY_TYPE_SHARED,
+        DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_NORMAL,
+        DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_MEASURING_MODE_NATURAL,
+        DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_METRICS,
     };
     use windows::Win32::Graphics::DirectComposition::{
         DCompositionCreateDevice, IDCompositionDevice, IDCompositionSurface, IDCompositionTarget,
@@ -60,8 +66,7 @@ mod win {
         }
     }
 
-    // Los campos se transportan de extremo a extremo ya, pero aún no se leen: el render de
-    // esta tarea pinta una lengüeta sólida sin texto ni logo (eso llega en tareas posteriores).
+    // title/body ya se pintan; keys (keycaps) y kind (icono/logo) se leerán en tareas posteriores.
     #[allow(dead_code)]
     #[derive(Clone)]
     pub struct ToastData {
@@ -71,7 +76,6 @@ mod win {
         pub kind: ToastKind,
     }
 
-    #[allow(dead_code)]
     enum Cmd {
         Show(ToastData),
         Hide,
@@ -80,10 +84,15 @@ mod win {
     const WM_APP_WAKE: u32 = WM_APP + 1;
     const TIMER_ID: usize = 1;
     const HIDE_MS: u32 = 2800;
-    const TAB_W: f32 = 360.0;
     const TAB_H: f32 = 76.0;
     const CORNER: f32 = 8.0;
     const TOP_MARGIN: f32 = 12.0;
+    const TEXT_LEFT: f32 = 44.0;
+    const RIGHT_PAD: f32 = 24.0;
+    const TITLE_TOP: f32 = 17.0;
+    const TITLE_LINE: f32 = 22.0;
+    const BODY_TOP: f32 = 39.0;
+    const BODY_LINE: f32 = 20.0;
 
     thread_local! {
         static RENDERER: RefCell<Option<Renderer>> = const { RefCell::new(None) };
@@ -163,12 +172,18 @@ mod win {
         _d3d: ID3D11Device,
         ctx: ID2D1DeviceContext,
         brush: ID2D1SolidColorBrush,
+        dwrite: IDWriteFactory,
+        title_format: IDWriteTextFormat,
+        body_format: IDWriteTextFormat,
+        text_bright: ID2D1SolidColorBrush,
+        text_dim: ID2D1SolidColorBrush,
         dcomp: IDCompositionDevice,
         _target: IDCompositionTarget,
         visual: IDCompositionVisual,
         surface: Option<IDCompositionSurface>,
         surf_w: u32,
         surf_h: u32,
+        data: Option<ToastData>,
     }
 
     impl Renderer {
@@ -200,6 +215,49 @@ mod win {
                 None,
             )?;
 
+            let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
+            let title_format = dwrite.CreateTextFormat(
+                w!("Segoe UI"),
+                None,
+                DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                15.0,
+                w!("en-us"),
+            )?;
+            title_format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING)?;
+            title_format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+            let body_format = dwrite.CreateTextFormat(
+                w!("Segoe UI"),
+                None,
+                DWRITE_FONT_WEIGHT_NORMAL,
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                13.0,
+                w!("en-us"),
+            )?;
+            body_format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING)?;
+            body_format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+
+            let text_bright = ctx.CreateSolidColorBrush(
+                &D2D1_COLOR_F {
+                    r: 0xf0 as f32 / 255.0,
+                    g: 0xf2 as f32 / 255.0,
+                    b: 0xf7 as f32 / 255.0,
+                    a: 1.0,
+                },
+                None,
+            )?;
+            let text_dim = ctx.CreateSolidColorBrush(
+                &D2D1_COLOR_F {
+                    r: 0xf0 as f32 / 255.0,
+                    g: 0xf2 as f32 / 255.0,
+                    b: 0xf7 as f32 / 255.0,
+                    a: 0.72,
+                },
+                None,
+            )?;
+
             let dcomp: IDCompositionDevice = DCompositionCreateDevice(&dxgi)?;
             let target = dcomp.CreateTargetForHwnd(hwnd, true)?;
             let visual = dcomp.CreateVisual()?;
@@ -210,12 +268,18 @@ mod win {
                 _d3d: d3d,
                 ctx,
                 brush,
+                dwrite,
+                title_format,
+                body_format,
+                text_bright,
+                text_dim,
                 dcomp,
                 _target: target,
                 visual,
                 surface: None,
                 surf_w: 0,
                 surf_h: 0,
+                data: None,
             })
         }
 
@@ -283,6 +347,42 @@ mod win {
                 a: 0.0,
             }));
             self.ctx.FillRoundedRectangle(&rect, &self.brush);
+
+            if let Some(data) = self.data.as_ref() {
+                let text_left = ox + TEXT_LEFT * scale;
+                let right = ox + w as f32;
+                let title: Vec<u16> = data.title.encode_utf16().collect();
+                let body: Vec<u16> = data.body.encode_utf16().collect();
+                let title_rect = D2D_RECT_F {
+                    left: text_left,
+                    top: oy + TITLE_TOP * scale,
+                    right,
+                    bottom: oy + (TITLE_TOP + TITLE_LINE) * scale,
+                };
+                let body_rect = D2D_RECT_F {
+                    left: text_left,
+                    top: oy + BODY_TOP * scale,
+                    right,
+                    bottom: oy + (BODY_TOP + BODY_LINE) * scale,
+                };
+                self.ctx.DrawText(
+                    &title,
+                    &self.title_format,
+                    &title_rect,
+                    &self.text_bright,
+                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                    DWRITE_MEASURING_MODE_NATURAL,
+                );
+                self.ctx.DrawText(
+                    &body,
+                    &self.body_format,
+                    &body_rect,
+                    &self.text_dim,
+                    D2D1_DRAW_TEXT_OPTIONS_NONE,
+                    DWRITE_MEASURING_MODE_NATURAL,
+                );
+            }
+
             self.ctx.EndDraw(None, None)?;
             self.ctx.SetTarget(None);
 
@@ -291,11 +391,36 @@ mod win {
             Ok(())
         }
 
-        unsafe fn show(&mut self) {
+        // Ancho de una línea en DIPs (tamaño de fuente lógico); el llamador lo escala a píxeles.
+        unsafe fn line_width(&self, text: &[u16], format: &IDWriteTextFormat) -> f32 {
+            let Ok(layout) = self.dwrite.CreateTextLayout(text, format, 1000.0, TAB_H) else {
+                return 0.0;
+            };
+            let mut m = DWRITE_TEXT_METRICS::default();
+            if layout.GetMetrics(&mut m).is_ok() {
+                m.width
+            } else {
+                0.0
+            }
+        }
+
+        unsafe fn measure(&self, data: &ToastData, scale: f32) -> (f32, f32) {
+            let title: Vec<u16> = data.title.encode_utf16().collect();
+            let body: Vec<u16> = data.body.encode_utf16().collect();
+            let line = self
+                .line_width(&title, &self.title_format)
+                .max(self.line_width(&body, &self.body_format));
+            let width = TEXT_LEFT + line + RIGHT_PAD;
+            (width * scale, TAB_H * scale)
+        }
+
+        unsafe fn show(&mut self, data: ToastData) {
             let mon = primary_monitor();
             let scale = monitor_scale(mon);
-            let w = (TAB_W * scale).round() as i32;
-            let h = (TAB_H * scale).round() as i32;
+            let (fw, fh) = self.measure(&data, scale);
+            let w = fw.round() as i32;
+            let h = fh.round() as i32;
+            self.data = Some(data);
             place(self.hwnd, w, h, scale);
             if self.render(w as u32, h as u32, scale).is_err() {
                 return;
@@ -390,7 +515,7 @@ mod win {
                             RENDERER.with(|r| {
                                 if let Some(rend) = r.borrow_mut().as_mut() {
                                     match cmd {
-                                        Cmd::Show(_) => rend.show(),
+                                        Cmd::Show(data) => rend.show(data),
                                         Cmd::Hide => rend.hide(),
                                     }
                                 }
