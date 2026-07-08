@@ -74,8 +74,6 @@ mod win {
         }
     }
 
-    // title/body ya se pintan; keys (keycaps) y kind (icono/logo) se leerán en tareas posteriores.
-    #[allow(dead_code)]
     #[derive(Clone)]
     pub struct ToastData {
         pub title: String,
