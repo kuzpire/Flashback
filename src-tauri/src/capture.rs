@@ -719,17 +719,21 @@ mod win {
                 None => None,
             };
 
-            // El encoder H.264 vive dentro del SinkWriter; se obtiene su ICodecAPI para
-            // aplicar la misma política de calidad que el replay (VBR + CABAC + GOP ~2 s).
-            // Best-effort: si no se puede obtener, el clip sale con perfil High pero el rate
-            // control por defecto del encoder.
+            // Misma política de calidad que el replay (VBR + CABAC + GOP ~2 s) sobre el
+            // encoder que hospeda el SinkWriter. El encoder NO tiene por qué ser el primer
+            // transform del stream: con entrada ARGB32 el SinkWriter intercala un conversor
+            // de color, así que recorremos los transforms y aplicamos a los que expongan
+            // ICodecAPI. El conversor ignora las propiedades de encoder (best-effort). Se
+            // hace antes de BeginWriting, cuando la cadena ya está resuelta.
             if let Ok(ex) = writer.cast::<IMFSinkWriterEx>() {
-                let mut transform: Option<IMFTransform> = None;
-                if unsafe { ex.GetTransformForStream(stream, 0, None, &mut transform) }.is_ok() {
-                    if let Some(t) = transform {
-                        if let Ok(codec) = t.cast::<ICodecAPI>() {
-                            apply_quality_codec_settings(&codec, bitrate, (fps * 2).max(16));
-                        }
+                for idx in 0..8u32 {
+                    let mut transform: Option<IMFTransform> = None;
+                    if unsafe { ex.GetTransformForStream(stream, idx, None, &mut transform) }.is_err()
+                    {
+                        break;
+                    }
+                    if let Some(codec) = transform.and_then(|t| t.cast::<ICodecAPI>().ok()) {
+                        apply_quality_codec_settings(&codec, bitrate, (fps * 2).max(16));
                     }
                 }
             }
