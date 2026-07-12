@@ -147,7 +147,7 @@ mod win {
         COINIT_MULTITHREADED,
     };
     use windows::Win32::System::SystemInformation::GetLocalTime;
-    use windows::Win32::System::Variant::{VARIANT, VT_UI4};
+    use windows::Win32::System::Variant::{VARIANT, VT_BOOL, VT_UI4};
     use windows::Win32::System::WinRT::Direct3D11::{
         CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess,
     };
@@ -689,6 +689,7 @@ mod win {
                 out_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
                 out_type.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_H264)?;
                 out_type.SetUINT32(&MF_MT_AVG_BITRATE, bitrate)?;
+                out_type.SetUINT32(&MF_MT_MPEG2_PROFILE, 100)?;
                 out_type.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
                 out_type.SetUINT64(&MF_MT_FRAME_SIZE, pack2(out_w, out_h))?;
                 out_type.SetUINT64(&MF_MT_FRAME_RATE, pack2(fps, 1))?;
@@ -717,6 +718,21 @@ mod win {
                 Some((rate, ch)) => Some(add_aac_stream(&writer, rate, ch)?),
                 None => None,
             };
+
+            // El encoder H.264 vive dentro del SinkWriter; se obtiene su ICodecAPI para
+            // aplicar la misma política de calidad que el replay (VBR + CABAC + GOP ~2 s).
+            // Best-effort: si no se puede obtener, el clip sale con perfil High pero el rate
+            // control por defecto del encoder.
+            if let Ok(ex) = writer.cast::<IMFSinkWriterEx>() {
+                let mut transform: Option<IMFTransform> = None;
+                if unsafe { ex.GetTransformForStream(stream, 0, None, &mut transform) }.is_ok() {
+                    if let Some(t) = transform {
+                        if let Ok(codec) = t.cast::<ICodecAPI>() {
+                            apply_quality_codec_settings(&codec, bitrate, (fps * 2).max(16));
+                        }
+                    }
+                }
+            }
 
             unsafe { writer.BeginWriting()? };
 
@@ -1958,11 +1974,11 @@ mod win {
             out_type.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_H264)?;
             out_type.SetUINT32(&MF_MT_AVG_BITRATE, bitrate)?;
             out_type.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
-            // Perfil Baseline (66): sin B-frames, así el encoder emite los paquetes en el
-            // mismo orden que entran. Eso nos deja emparejar cada salida con el timestamp
-            // de entrada real por FIFO en vez de fiarnos del que escupe el MFT (poco
-            // fiable: a veces sale a 0 y el MP4 queda con duración nula).
-            out_type.SetUINT32(&MF_MT_MPEG2_PROFILE, 66)?;
+            // Perfil High (100) + CABAC (lo activa apply_quality_codec_settings). Sin
+            // B-frames (DefaultBPictureCount=0): el perfil High sin reordenado conserva el
+            // orden salida=entrada, del que depende el emparejado FIFO de timestamps (el que
+            // escupe el MFT es poco fiable: a veces sale a 0 y el MP4 queda con duración nula).
+            out_type.SetUINT32(&MF_MT_MPEG2_PROFILE, 100)?;
             out_type.SetUINT64(&MF_MT_FRAME_SIZE, pack2(width, height))?;
             out_type.SetUINT64(&MF_MT_FRAME_RATE, pack2(fps, 1))?;
             out_type.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, pack2(1, 1))?;
@@ -1980,17 +1996,12 @@ mod win {
             encoder.SetInputType(0, &in_type, 0)?;
         }
 
-        // IDR periódico (~2 s): así guardar el replay arranca siempre en un keyframe
-        // reciente y el buffer se poda con eficiencia (trim corta hasta el último IDR).
-        // Best-effort vía ICodecAPI: si el encoder no expone estas propiedades se ignora
-        // y queda el GOP por defecto. DefaultBPictureCount=0 refuerza Baseline (sin
-        // reordenado), de lo que depende el emparejado por FIFO de timestamps.
+        // GOP ~1 s (antes 0.5 s): menos IDRs caros = mejor calidad, sin perder mucha
+        // granularidad para alinear el guardado del replay al keyframe anterior. Best-effort
+        // vía ICodecAPI (rate control VBR + CABAC + B-frames=0); si el encoder no expone una
+        // propiedad se ignora y queda su default.
         if let Ok(codec) = encoder.cast::<ICodecAPI>() {
-            let gop = (fps / 2).max(8).min(60);
-            unsafe {
-                let _ = codec.SetValue(&CODECAPI_AVEncMPVGOPSize, &variant_u32(gop));
-                let _ = codec.SetValue(&CODECAPI_AVEncMPVDefaultBPictureCount, &variant_u32(0));
-            }
+            apply_quality_codec_settings(&codec, bitrate, fps.max(8));
         }
         Ok(())
     }
@@ -3356,6 +3367,38 @@ mod win {
         v
     }
 
+    fn variant_bool(val: bool) -> VARIANT {
+        let mut v = VARIANT::default();
+        unsafe {
+            let inner = &mut *v.Anonymous.Anonymous;
+            inner.vt = VT_BOOL;
+            inner.Anonymous.boolVal =
+                windows::Win32::Foundation::VARIANT_BOOL(if val { -1 } else { 0 });
+        }
+        v
+    }
+
+    // Pico de VBR = 1.75x la media: da margen a las escenas complejas sin disparar el
+    // tamaño. saturating_mul evita overflow con bitrates muy altos (4K).
+    fn peak_bitrate(mean: u32) -> u32 {
+        mean.saturating_mul(7) / 4
+    }
+
+    // Política de calidad común a los dos caminos (manual y replay). Peak-Constrained VBR
+    // (modo 1) con media/pico, CABAC y B-frames=0. Todo best-effort: si un MFT no expone
+    // una propiedad se ignora y queda su default (CLAUDE.md §4.4).
+    fn apply_quality_codec_settings(codec: &ICodecAPI, mean_bitrate: u32, gop: u32) {
+        unsafe {
+            let _ = codec.SetValue(&CODECAPI_AVEncCommonRateControlMode, &variant_u32(1));
+            let _ = codec.SetValue(&CODECAPI_AVEncCommonMeanBitRate, &variant_u32(mean_bitrate));
+            let _ =
+                codec.SetValue(&CODECAPI_AVEncCommonMaxBitRate, &variant_u32(peak_bitrate(mean_bitrate)));
+            let _ = codec.SetValue(&CODECAPI_AVEncH264CABACEnable, &variant_bool(true));
+            let _ = codec.SetValue(&CODECAPI_AVEncMPVGOPSize, &variant_u32(gop));
+            let _ = codec.SetValue(&CODECAPI_AVEncMPVDefaultBPictureCount, &variant_u32(0));
+        }
+    }
+
     fn clip_filename() -> String {
         let st: SYSTEMTIME = unsafe { GetLocalTime() };
         format!(
@@ -3647,6 +3690,12 @@ mod win {
             // Más resolución/fps/calidad => más bitrate (sin depender de la exactitud del f64).
             assert!(target_bitrate(1920, 1080, 60, 0.40) > target_bitrate(1280, 720, 60, 0.40));
             assert!(target_bitrate(1920, 1080, 60, 0.40) > target_bitrate(1920, 1080, 30, 0.40));
+        }
+
+        #[test]
+        fn peak_bitrate_is_1_75x() {
+            assert_eq!(peak_bitrate(40_000_000), 70_000_000);
+            assert_eq!(peak_bitrate(0), 0);
         }
 
         #[test]
