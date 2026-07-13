@@ -22,12 +22,14 @@
   import { refreshLibrary } from '$lib/library.svelte';
   import { revealItemInDir } from '@tauri-apps/plugin-opener';
   import { convertFileSrc } from '@tauri-apps/api/core';
+  import { getCurrentWindow } from '@tauri-apps/api/window';
 
   let video = $state<HTMLVideoElement | null>(null);
   let sysAudio = $state<HTMLAudioElement | null>(null);
   let micAudio = $state<HTMLAudioElement | null>(null);
 
   let playing = $state(false);
+  let fs = $state(false);
   let outPos = $state(0); // posición en el tiempo de salida (ms)
   let playIndex = 0; // segmento que se está reproduciendo
   let raf = 0;
@@ -666,16 +668,22 @@
     bubble = null;
   }
 
+  // Pantalla completa vía la ventana NATIVA de Tauri, no la API de fullscreen del navegador:
+  // en WebView2, con la ventana maximizada, el fullscreen HTML deja el vídeo con franjas
+  // (el lienzo de fullscreen queda con tamaño equivocado). Poniendo la ventana nativa en
+  // fullscreen el WebView cubre el monitor exacto y el vídeo (overlay .fs) lo llena bien.
+  async function setFs(on: boolean) {
+    fs = on;
+    try {
+      await getCurrentWindow().setFullscreen(on);
+    } catch {
+      /* best-effort: si falla, se queda como está */
+    }
+  }
+
   function toggleFullscreen() {
     if (!video) return;
-    if (document.fullscreenElement) {
-      document.exitFullscreen().catch(() => {});
-    } else {
-      // Pantalla completa sobre el propio <video>: usa el modo de medios del navegador, que
-      // escala según la proporción real del clip y llena el monitor sin depender del tamaño
-      // de la ventana (poner el contenedor en fullscreen dejaba franjas al estar maximizada).
-      video.requestFullscreen().catch(() => {});
-    }
+    setFs(!fs);
   }
 
   function onKey(e: KeyboardEvent) {
@@ -686,7 +694,10 @@
     }
     if ((e.target as HTMLElement)?.tagName === 'INPUT') return;
     if (e.key === 'Escape') {
-      if (document.fullscreenElement) return;
+      if (fs) {
+        setFs(false);
+        return;
+      }
       close();
     } else if (e.key === 'f' || e.key === 'F') {
       e.preventDefault();
@@ -754,6 +765,7 @@
 
   async function close() {
     pause();
+    if (fs) await setFs(false);
     await persistEdit();
     closeEditor();
   }
@@ -904,6 +916,9 @@
           bind:this={video}
           src={editorState.videoSrc}
           playsinline
+          class:fs
+          controls={fs}
+          controlslist="nofullscreen"
           onloadedmetadata={onLoaded}
           onended={pause}
           onclick={toggle}
@@ -1213,9 +1228,20 @@
     justify-content: center;
     padding: 22px 40px;
   }
-  .stage video:fullscreen {
+  /* Overlay de pantalla completa: la ventana nativa ya cubre el monitor, así que el vídeo se
+     fija al viewport completo. object-fit:contain deja solo el letterbox real de su proporción. */
+  .stage video.fs {
+    position: fixed;
+    inset: 0;
+    width: 100vw;
+    height: 100vh;
+    max-width: none;
+    max-height: none;
+    object-fit: contain;
+    background: #000;
     border-radius: 0;
     box-shadow: none;
+    z-index: 9999;
   }
   .stage video {
     max-width: 100%;
