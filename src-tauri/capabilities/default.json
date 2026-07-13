@@ -19,7 +19,10 @@
     "core:window:allow-set-focus",
     "opener:default",
     "opener:allow-reveal-item-in-dir",
-    "opener:allow-open-path",
+    {
+      "identifier": "opener:allow-open-path",
+      "allow": [{ "path": "$VIDEO/**" }, { "path": "$APPDATA/**" }]
+    },
     "updater:default",
     "process:allow-restart",
     "global-shortcut:allow-register",

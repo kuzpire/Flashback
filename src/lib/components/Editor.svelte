@@ -835,8 +835,13 @@
     if (shotToastTimer) clearTimeout(shotToastTimer);
     shotToastTimer = setTimeout(() => (shotToast = null), 6000);
   }
-  function openShot() {
-    if (shotToast) openPath(shotToast.path).catch((e) => console.error('openPath', e));
+  async function openShot() {
+    if (!shotToast) return;
+    try {
+      await openPath(shotToast.path);
+    } catch (e) {
+      console.error('openPath', e);
+    }
   }
 
   async function close() {
