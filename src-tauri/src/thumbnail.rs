@@ -116,9 +116,13 @@ mod win {
             unsafe { reader.SetCurrentPosition(&GUID::zeroed(), &pos)? };
         }
 
-        // Primer frame con datos (algunos contenedores entregan muestras vacías al inicio).
-        let mut frame = None;
-        for _ in 0..120 {
+        // Tras el seek, MF deja el lector en el keyframe <= tiempo pedido; hay que AVANZAR
+        // decodificando hasta el fotograma realmente mostrado en `seek_hns` (el de mayor PTS
+        // <= objetivo), o la captura saldría hasta un GOP atrasada respecto al vídeo pausado.
+        // Para miniatura (seek_hns < 0) basta el primer frame con datos.
+        const EPS_HNS: i64 = 20_000; // 2 ms de tolerancia al redondeo de currentTime
+        let mut frame: Option<IMFSample> = None;
+        for _ in 0..2000 {
             let mut flags = 0u32;
             let mut sample: Option<IMFSample> = None;
             unsafe {
@@ -134,8 +138,21 @@ mod win {
             if flags & ENDOFSTREAM != 0 {
                 break;
             }
-            if let Some(s) = sample {
+            let Some(s) = sample else { continue };
+            if seek_hns < 0 {
                 frame = Some(s);
+                break;
+            }
+            let ts = unsafe { s.GetSampleTime() }.unwrap_or(0);
+            if ts <= seek_hns + EPS_HNS {
+                // Aún en/antes del objetivo: guardar y seguir avanzando.
+                frame = Some(s);
+            } else {
+                // Pasado el objetivo: el frame mostrado es el anterior ya guardado; si el
+                // primero ya va pasado (seek cayó después), usar este.
+                if frame.is_none() {
+                    frame = Some(s);
+                }
                 break;
             }
         }
