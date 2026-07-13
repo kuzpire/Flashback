@@ -1010,7 +1010,7 @@
 
     {#if kept > 0 || editorState.loading}
       <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div class="tl" style="--gutter: 210px; --zoom: {zoom};" onwheel={onTimelineWheel}>
+      <div class="tl" style="--gutter: 235px; --zoom: {zoom};" onwheel={onTimelineWheel}>
     <div class="tl-ruler"></div>
 
     <div class="tl-body" bind:this={bodyEl}>
@@ -1656,7 +1656,7 @@
   .hfader-rail {
     --th: 16px;
     position: relative;
-    width: 116px;
+    width: 140px;
     height: 34px;
     cursor: pointer;
     outline: none;
