@@ -354,7 +354,7 @@
     loadMonitors();
     loadAudioInputs();
     loadDisabledGames();
-    const id = setInterval(refresh, 5000);
+    const id = setInterval(refresh, 2000);
     return () => {
       clearInterval(id);
     };
@@ -418,7 +418,11 @@
     const target = captureTarget;
     const mic = micOn;
     const micDevice = micInput;
-    const key = enabled && target ? `${target}|${seconds}|${fps}|${quality}|${resolution}|${bitrate}|${mic}|${micDevice}` : 'off';
+    // En modo Aplicación el objetivo es siempre 'window', pero debe re-armarse al cambiar de juego:
+    // se mete la identidad del juego en la key para que cambiar de juego reconstruya la captura
+    // contra la nueva ventana (si no, seguiría capturando el juego anterior/minimizado).
+    const targetKey = target === 'window' ? `window:${game}` : target;
+    const key = enabled && target ? `${targetKey}|${seconds}|${fps}|${quality}|${resolution}|${bitrate}|${mic}|${micDevice}` : 'off';
     if (key === lastReplayKey) return;
     // Solo avisamos "Listo para clipear" al armar el replay desde apagado, no en cada
     // reconfiguración (cambiar calidad/fps reinicia el replay pero no es un evento nuevo).

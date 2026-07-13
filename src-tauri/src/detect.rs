@@ -200,12 +200,55 @@ pub fn current_game() -> Option<DetectedGame> {
     CURRENT.lock().unwrap().as_ref().map(|(_, g)| g.clone())
 }
 
+// Refresca el juego rastreado con el mapa ya cacheado (si aún no se cargó, no hace nada). Lo usa
+// el watcher para mantener current_game_pid() fresco sin depender del poll de la UI.
+pub fn refresh_current() {
+    let map = MAP.lock().unwrap().as_ref().cloned();
+    if let Some(map) = map {
+        let _ = detect_with(&map);
+    }
+}
+
+// Watcher ligero: mira la ventana en primer plano cada segundo y, solo cuando cambia, re-detecta el
+// juego. Así un cambio de juego se nota en ~1 s (no en los 5 s del poll de la UI) y no se barren
+// procesos mientras el foco no cambia. current_game_pid() queda fresco para cuando se re-arma el
+// replay contra la nueva ventana.
+#[cfg(target_os = "windows")]
+pub fn spawn_watcher() {
+    std::thread::spawn(|| {
+        let mut last_fg = 0u32;
+        loop {
+            std::thread::sleep(Duration::from_millis(1000));
+            let fg = foreground_pid().unwrap_or(0);
+            if fg != last_fg {
+                last_fg = fg;
+                refresh_current();
+            }
+        }
+    });
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn spawn_watcher() {}
+
 #[cfg(target_os = "windows")]
 fn detect_with(map: &GameMap) -> Option<DetectedGame> {
+    let fg = foreground_pid();
+
+    // Fast-path: si el primer plano sigue siendo el juego ya rastreado, lo devolvemos sin barrer
+    // todos los procesos (el caso común mientras juegas). Solo se re-escanea al cambiar de ventana.
+    if let Some(pid) = fg {
+        if let Some((cpid, game)) = CURRENT.lock().unwrap().as_ref() {
+            if *cpid == pid {
+                return Some(game.clone());
+            }
+        }
+    }
+
     let procs = running_processes();
 
     // La ventana en primer plano manda: es lo que el usuario está jugando.
-    if let Some(pid) = foreground_pid() {
+    if let Some(pid) = fg {
         let base = procs.iter().find(|(p, _)| *p == pid).map(|(_, b)| b.clone());
         let path = process_path(pid);
 
