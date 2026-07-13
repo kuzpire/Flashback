@@ -368,10 +368,12 @@ mod win {
         loop {
             {
                 let mut e = enc.lock().unwrap();
-                if e.has_frame() {
-                    let now = Instant::now();
-                    let start = *t0.get_or_insert(now);
-                    let cur = elapsed_slots(start, interval);
+                if let Some(frame_slot) = e.latest_slot(interval) {
+                    let start = *t0.get_or_insert_with(Instant::now);
+                    let wall = elapsed_slots(start, interval);
+                    // Cadencia guiada por el timestamp del frame (fase estable => sin batido); el
+                    // reloj de pared solo rellena duplicados en congelados reales (>=STALL_SLOTS).
+                    let cur = if wall - frame_slot >= STALL_SLOTS { wall - 1 } else { frame_slot };
                     // Sobrecarga (encoder por debajo de la tasa): no acumular retraso sin fin;
                     // resincronizar cerca del slot actual. A 60 fps no debería ocurrir.
                     if cur - emitted > fps as i64 {
@@ -621,6 +623,9 @@ mod win {
         latest: Option<usize>,
         base: i64,
         has_base: bool,
+        // Timestamp WGC (SystemRelativeTime) del último frame real: ancla la rejilla CFR al reloj
+        // del juego para que la cadencia no bata con el reloj de pared (evita micro-tirones).
+        last_time: i64,
         path: String,
         finalized: bool,
         audio_err_logged: bool,
@@ -790,6 +795,7 @@ mod win {
                 latest: None,
                 base: 0,
                 has_base: false,
+                last_time: 0,
                 path,
                 finalized: false,
                 audio_err_logged: false,
@@ -849,14 +855,17 @@ mod win {
                 self.has_base = true;
                 self.base = time;
             }
+            self.last_time = time;
             let idx = self.next;
             self.next = (self.next + 1) % self.pool.len();
             unsafe { self.ctx.CopyResource(&self.pool[idx], src) };
             self.latest = Some(idx);
         }
 
-        fn has_frame(&self) -> bool {
-            self.latest.is_some()
+        // Slot CFR del último frame real por su timestamp (base = primer frame). None si aún no
+        // llegó ninguno. La cadencia se guía por esto, no por el reloj de pared (sin batido).
+        fn latest_slot(&self, interval: i64) -> Option<i64> {
+            self.latest.map(|_| time_slot(self.last_time, self.base, interval))
         }
 
         // Escribe el último frame disponible con un PTS sintético de cadencia constante. Se
@@ -2135,6 +2144,27 @@ mod win {
         hns / interval.max(1)
     }
 
+    // Slot de cadencia al que pertenece un frame según su timestamp WGC real (SystemRelativeTime,
+    // en 100 ns; mismo reloj QPC que Instant, así que no hay deriva de tasa). Redondeo al más
+    // cercano: fija cada frame a su slot por su TIEMPO de presentación, no por cuándo despierta el
+    // pump. Eso elimina el batido de muestreo (dup+drop periódico) que producía los micro-tirones.
+    // `base` = timestamp del primer frame emitido (slot 0).
+    fn time_slot(time: i64, base: i64, interval: i64) -> i64 {
+        let d = time - base;
+        if d <= 0 {
+            0
+        } else {
+            (d + interval / 2) / interval.max(1)
+        }
+    }
+
+    // Umbral de "stall real": si el reloj de pared se adelanta este nº de slots respecto al último
+    // frame recibido, la pantalla está congelada (WGC no entrega frames en escenas estáticas) y
+    // rellenamos con duplicados para no vaciar el ring. Por debajo, la cadencia la marca solo el
+    // timestamp del frame. Se deja holgura (>2) para no interferir con fuentes a menos fps que el
+    // clip, cuyo hueco natural entre frames es de ~2 slots (p. ej. juego a 30 en clip de 60).
+    const STALL_SLOTS: i64 = 3;
+
     // Espera de cadencia: por debajo de un periodo de frame para no quemar CPU ni perder
     // slots. Con timeBeginPeriod(1) activo el sleep es preciso a ~1 ms.
     fn pace_sleep(interval: i64) -> Duration {
@@ -2207,8 +2237,10 @@ mod win {
             // worker detecte si se recicló); se duplica en los slots sin frame nuevo.
             let mut latest: Option<ID3D11Texture2D> = None;
             let mut latest_seq: u64 = u64::MAX;
-            // Reloj de cadencia: t0 se ancla al primer frame enviado; `emitted` es el último slot
+            // Cadencia: t0_time (timestamp WGC del primer frame) ancla la rejilla CFR al reloj real
+            // del juego; t0 (Instant) es solo la red para congelados. `emitted` es el último slot
             // emitido y `emitted_pts` su PTS (monotonía en la frontera con el cartel).
+            let mut t0_time: Option<i64> = None;
             let mut t0: Option<Instant> = None;
             let mut emitted: i64 = -1;
             let mut emitted_pts: i64 = -1;
@@ -2267,12 +2299,19 @@ mod win {
                         }
                     }
                 } else if let Some(src) = latest.clone() {
-                    // El reloj se ancla DESPUÉS del primer envío: NVENC inicializa su sesión de
-                    // forma perezosa en el primer ProcessInput y puede bloquear ~200 ms. Ese
-                    // arranque lo absorbe la cola (frames reales encolados), no un backlog de
-                    // duplicados congelados. Mientras t0 sea None solo se emite el slot 0.
-                    let cur = match t0 {
-                        Some(start) => elapsed_slots(start, interval),
+                    // La cadencia la marca el TIMESTAMP real del frame (time_slot), no el reloj de
+                    // pared: cada frame cae en su slot por su tiempo de presentación, eliminando el
+                    // batido de muestreo (micro-tirones). El reloj de pared solo actúa de red en
+                    // stalls reales (pantalla congelada): si se adelanta >=STALL_SLOTS, rellena con
+                    // duplicados para no vaciar el ring. El ancla (t0) se fija DESPUÉS del primer
+                    // envío: NVENC inicializa su sesión de forma perezosa en el primer ProcessInput
+                    // (~200 ms) y ese arranque lo absorbe la cola, no un backlog de duplicados.
+                    let cur = match t0_time {
+                        Some(base) => {
+                            let frame_slot = time_slot(foc.last_time, base, interval);
+                            let wall = t0.map_or(frame_slot, |s| elapsed_slots(s, interval));
+                            if wall - frame_slot >= STALL_SLOTS { wall - 1 } else { frame_slot }
+                        }
                         None => emitted + 1,
                     };
                     // Red de seguridad: el pacing ya no toca la GPU (el convert vive en el
@@ -2302,11 +2341,12 @@ mod win {
                         }
                         emitted = slot;
                         emitted_pts = pts;
-                        if t0.is_none() {
-                            // Primer frame enviado: arranca el reloj y fija el origen temporal del
-                            // vídeo (escala WGC) para que el audio, rebasado contra video_base,
-                            // comparta el cero con el vídeo.
+                        if t0_time.is_none() {
+                            // Primer frame enviado: fija el origen temporal del vídeo (escala WGC)
+                            // para que el audio, rebasado contra video_base, comparta el cero con el
+                            // vídeo; t0_time ancla la rejilla CFR al timestamp y t0 el reloj de red.
                             pipe.video_base.store(foc.last_time, Ordering::SeqCst);
+                            t0_time = Some(foc.last_time);
                             t0 = Some(Instant::now());
                         }
                     }
@@ -2443,6 +2483,7 @@ mod win {
         let mut pts_fifo: VecDeque<i64> = VecDeque::new();
         let mut foc = FocusState::new();
         let mut latest: Option<ID3D11Texture2D> = None;
+        let mut t0_time: Option<i64> = None;
         let mut t0: Option<Instant> = None;
         let mut emitted: i64 = -1;
         let mut emitted_pts: i64 = -1;
@@ -2484,12 +2525,21 @@ mod win {
                     }
                 }
             } else if let Some(src) = latest.clone() {
-                let now = Instant::now();
-                let start = *t0.get_or_insert_with(|| {
-                    pipe.video_base.store(foc.last_time, Ordering::SeqCst);
-                    now
-                });
-                let cur = elapsed_slots(start, interval);
+                // Cadencia anclada al timestamp real del frame (sin batido); el reloj de pared solo
+                // rellena duplicados en congelados reales (>=STALL_SLOTS sin frame nuevo).
+                let cur = match t0_time {
+                    Some(base) => {
+                        let frame_slot = time_slot(foc.last_time, base, interval);
+                        let wall = t0.map_or(frame_slot, |s| elapsed_slots(s, interval));
+                        if wall - frame_slot >= STALL_SLOTS { wall - 1 } else { frame_slot }
+                    }
+                    None => {
+                        pipe.video_base.store(foc.last_time, Ordering::SeqCst);
+                        t0_time = Some(foc.last_time);
+                        t0 = Some(Instant::now());
+                        emitted + 1
+                    }
+                };
                 // Si el encoder software no sostiene la tasa, no acumular retraso sin fin:
                 // saltar cerca del slot actual descartando duplicados (CFR best-effort, solo
                 // en sobrecarga). A perfiles ligeros (p. ej. 480p/20) no ocurre.
@@ -3706,6 +3756,28 @@ mod win {
             assert_eq!(cfr_pts(0, 60), 0);
             // Monotonía estricta.
             assert!(cfr_pts(2, 60) > cfr_pts(1, 60));
+        }
+
+        #[test]
+        fn time_slot_snaps_to_nearest() {
+            let iv = fps_interval(60); // 166_666
+            // Frame en el instante base => slot 0.
+            assert_eq!(time_slot(1_000, 1_000, iv), 0);
+            // Antes del base (jitter) => nunca negativo.
+            assert_eq!(time_slot(500, 1_000, iv), 0);
+            // Redondeo al slot más cercano, no floor: 0.6 de slot cae en el 1.
+            assert_eq!(time_slot(iv * 6 / 10, 0, iv), 1);
+            assert_eq!(time_slot(iv * 4 / 10, 0, iv), 0);
+            // Fuente a 60 exactos: cada frame en su slot, monótono y sin colisiones.
+            for k in 0..120i64 {
+                assert_eq!(time_slot(k * iv, 0, iv), k, "k={k}");
+            }
+            // Fuente a 30 en clip de 60: los frames caen en slots pares (0,2,4…) => el
+            // duplicado de relleno los convierte en 60 sin batido.
+            let iv30 = fps_interval(30);
+            for k in 0..60i64 {
+                assert_eq!(time_slot(k * iv30, 0, iv), k * 2, "k={k}");
+            }
         }
 
         #[test]
