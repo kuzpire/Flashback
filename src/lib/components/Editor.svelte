@@ -930,8 +930,6 @@
           src={editorState.videoSrc}
           playsinline
           class:fs
-          controls={fs}
-          controlslist="nofullscreen"
           onloadedmetadata={onLoaded}
           onended={pause}
           onclick={toggle}
@@ -952,6 +950,36 @@
     {/if}
   </div>
 
+  {#snippet transportButtons()}
+    <button class="tp-btn" aria-label={t('ed.captureFrame')} onclick={screenshot}>
+      <Icon name="camera" size={18} />
+    </button>
+    <button class="tp-btn" aria-label={t('ed.goStart')} onclick={() => seekOutput(0)}>
+      <Icon name="skip-back" size={20} />
+    </button>
+    <button class="tp-btn" aria-label={t('ed.prevFrame')} onclick={() => stepFrame(-1)}>
+      <Icon name="step-back" size={20} />
+    </button>
+    <button class="tp-play" aria-label={playing ? t('ed.pause') : t('ed.play')} onclick={toggle}>
+      <Icon name={playing ? 'stop' : 'play'} size={19} />
+    </button>
+    <button class="tp-btn" aria-label={t('ed.nextFrame')} onclick={() => stepFrame(1)}>
+      <Icon name="step-fwd" size={20} />
+    </button>
+    <button class="tp-btn" aria-label={t('ed.goEnd')} onclick={() => seekOutput(kept)}>
+      <Icon name="skip-fwd" size={20} />
+    </button>
+    <button class="tp-btn" aria-label={t('ed.fullscreen')} onclick={toggleFullscreen}>
+      <Icon name="maximize" size={18} />
+    </button>
+  {/snippet}
+
+  {#if fs}
+    <div class="fs-controls">
+      {@render transportButtons()}
+    </div>
+  {/if}
+
   <div class="dock" bind:this={dockEl} style:height={dockH !== null ? `${dockH}px` : null}>
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <div class="dock-grip" onmousedown={onDockGripDown} title={t('ed.dragResize')}></div>
@@ -965,27 +993,7 @@
       </div>
 
       <div class="tp-center">
-        <button class="tp-btn" aria-label={t('ed.captureFrame')} onclick={screenshot}>
-          <Icon name="camera" size={18} />
-        </button>
-        <button class="tp-btn" aria-label={t('ed.goStart')} onclick={() => seekOutput(0)}>
-          <Icon name="skip-back" size={20} />
-        </button>
-        <button class="tp-btn" aria-label={t('ed.prevFrame')} onclick={() => stepFrame(-1)}>
-          <Icon name="step-back" size={20} />
-        </button>
-        <button class="tp-play" aria-label={playing ? t('ed.pause') : t('ed.play')} onclick={toggle}>
-          <Icon name={playing ? 'stop' : 'play'} size={19} />
-        </button>
-        <button class="tp-btn" aria-label={t('ed.nextFrame')} onclick={() => stepFrame(1)}>
-          <Icon name="step-fwd" size={20} />
-        </button>
-        <button class="tp-btn" aria-label={t('ed.goEnd')} onclick={() => seekOutput(kept)}>
-          <Icon name="skip-fwd" size={20} />
-        </button>
-        <button class="tp-btn" aria-label={t('ed.fullscreen')} onclick={toggleFullscreen}>
-          <Icon name="maximize" size={18} />
-        </button>
+        {@render transportButtons()}
       </div>
 
       <div class="tp-right">
@@ -1240,6 +1248,24 @@
     align-items: center;
     justify-content: center;
     padding: 22px 40px;
+  }
+  /* Barra de controles en fullscreen: los mismos 7 botones del editor, flotando centrados
+     abajo sobre el vídeo (z por encima del overlay del vídeo). */
+  .fs-controls {
+    position: fixed;
+    left: 50%;
+    bottom: 30px;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 12px;
+    background: rgba(18, 18, 20, 0.72);
+    backdrop-filter: blur(14px);
+    border: 1px solid rgba(255, 255, 255, 0.09);
+    border-radius: 16px;
+    box-shadow: 0 16px 44px rgba(0, 0, 0, 0.55);
+    z-index: 10000;
   }
   /* Overlay de pantalla completa: la ventana nativa ya cubre el monitor, así que el vídeo se
      fija al viewport completo. object-fit:contain deja solo el letterbox real de su proporción. */
