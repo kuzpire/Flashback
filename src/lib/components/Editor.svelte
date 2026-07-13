@@ -672,12 +672,25 @@
   // en WebView2, con la ventana maximizada, el fullscreen HTML deja el vídeo con franjas
   // (el lienzo de fullscreen queda con tamaño equivocado). Poniendo la ventana nativa en
   // fullscreen el WebView cubre el monitor exacto y el vídeo (overlay .fs) lo llena bien.
+  let wasMaximized = false;
+
   async function setFs(on: boolean) {
     fs = on;
+    const win = getCurrentWindow();
     try {
-      await getCurrentWindow().setFullscreen(on);
-    } catch {
-      /* best-effort: si falla, se queda como está */
+      if (on) {
+        // Tauri: con la ventana maximizada, setFullscreen adopta el área de trabajo (deja la
+        // barra de tareas visible) en vez del monitor completo. Salir de maximizado primero lo
+        // evita; se restaura al salir de fullscreen.
+        wasMaximized = await win.isMaximized();
+        if (wasMaximized) await win.unmaximize();
+        await win.setFullscreen(true);
+      } else {
+        await win.setFullscreen(false);
+        if (wasMaximized) await win.maximize();
+      }
+    } catch (e) {
+      notice = 'FS err: ' + e;
     }
   }
 
