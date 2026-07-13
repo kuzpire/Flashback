@@ -732,11 +732,22 @@ mod win {
                     {
                         break;
                     }
-                    if let Some(codec) = transform.and_then(|t| t.cast::<ICodecAPI>().ok()) {
-                        let gop = (fps * 2).max(16);
-                        let failed = set_quality_codec_settings(&codec, bitrate, gop);
-                        log_encoder_quality(&codec, "manual", bitrate, gop, &failed);
+                    let Some(t) = transform else { continue };
+                    let Ok(codec) = t.cast::<ICodecAPI>() else { continue };
+                    let gop = (fps * 2).max(16);
+                    let failed = set_quality_codec_settings(&codec, bitrate, gop);
+                    // El SinkWriter ya fijó el tipo de salida del encoder, así que el modo VBR
+                    // no "prende" con solo SetValue (a diferencia del replay, donde lo fijamos
+                    // antes de SetOutputType). Solo sobre el encoder real (aceptó RateControlMode),
+                    // re-aplicamos el MISMO tipo de salida tras fijar el rate control para que lo
+                    // relea. Pre-BeginWriting y con el tipo idéntico, el tipo de entrada se
+                    // conserva. Best-effort: si falla, queda en CBR sin romper la grabación.
+                    if !failed.contains(&"RateControlMode") {
+                        if let Ok(cur) = unsafe { t.GetOutputCurrentType(0) } {
+                            let _ = unsafe { t.SetOutputType(0, &cur, 0) };
+                        }
                     }
+                    log_encoder_quality(&codec, "manual", bitrate, gop, &failed);
                 }
             }
 
