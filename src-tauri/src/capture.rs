@@ -733,7 +733,7 @@ mod win {
                         break;
                     }
                     if let Some(codec) = transform.and_then(|t| t.cast::<ICodecAPI>().ok()) {
-                        apply_quality_codec_settings(&codec, bitrate, (fps * 2).max(16));
+                        apply_quality_codec_settings(&codec, bitrate, (fps * 2).max(16), "manual");
                     }
                 }
             }
@@ -2005,7 +2005,7 @@ mod win {
         // vía ICodecAPI (rate control VBR + CABAC + B-frames=0); si el encoder no expone una
         // propiedad se ignora y queda su default.
         if let Ok(codec) = encoder.cast::<ICodecAPI>() {
-            apply_quality_codec_settings(&codec, bitrate, fps.max(8));
+            apply_quality_codec_settings(&codec, bitrate, fps.max(8), "replay");
         }
         Ok(())
     }
@@ -3390,16 +3390,34 @@ mod win {
 
     // Política de calidad común a los dos caminos (manual y replay). Peak-Constrained VBR
     // (modo 1) con media/pico, CABAC y B-frames=0. Todo best-effort: si un MFT no expone
-    // una propiedad se ignora y queda su default (CLAUDE.md §4.4).
-    fn apply_quality_codec_settings(codec: &ICodecAPI, mean_bitrate: u32, gop: u32) {
+    // una propiedad se ignora y queda su default (CLAUDE.md §4.4). Registra qué ajustes
+    // rechazó el encoder y lee de vuelta el modo de rate control para confirmar (no suponer)
+    // que quedó en VBR. En el camino manual se llama sobre varios transforms: los que no son
+    // el encoder rechazan todo, así que no se registran (evita ruido).
+    fn apply_quality_codec_settings(codec: &ICodecAPI, mean_bitrate: u32, gop: u32, label: &str) {
         unsafe {
-            let _ = codec.SetValue(&CODECAPI_AVEncCommonRateControlMode, &variant_u32(1));
-            let _ = codec.SetValue(&CODECAPI_AVEncCommonMeanBitRate, &variant_u32(mean_bitrate));
-            let _ =
-                codec.SetValue(&CODECAPI_AVEncCommonMaxBitRate, &variant_u32(peak_bitrate(mean_bitrate)));
-            let _ = codec.SetValue(&CODECAPI_AVEncH264CABACEnable, &variant_bool(true));
-            let _ = codec.SetValue(&CODECAPI_AVEncMPVGOPSize, &variant_u32(gop));
-            let _ = codec.SetValue(&CODECAPI_AVEncMPVDefaultBPictureCount, &variant_u32(0));
+            let sets: [(&str, Result<()>); 6] = [
+                ("RateControlMode", codec.SetValue(&CODECAPI_AVEncCommonRateControlMode, &variant_u32(1))),
+                ("MeanBitRate", codec.SetValue(&CODECAPI_AVEncCommonMeanBitRate, &variant_u32(mean_bitrate))),
+                ("MaxBitRate", codec.SetValue(&CODECAPI_AVEncCommonMaxBitRate, &variant_u32(peak_bitrate(mean_bitrate)))),
+                ("CABAC", codec.SetValue(&CODECAPI_AVEncH264CABACEnable, &variant_bool(true))),
+                ("GOPSize", codec.SetValue(&CODECAPI_AVEncMPVGOPSize, &variant_u32(gop))),
+                ("BPictureCount", codec.SetValue(&CODECAPI_AVEncMPVDefaultBPictureCount, &variant_u32(0))),
+            ];
+            let failed: Vec<&str> = sets.iter().filter(|(_, r)| r.is_err()).map(|(n, _)| *n).collect();
+            // Este transform no es el encoder (p. ej. el conversor de color): no registrar.
+            if failed.len() == sets.len() {
+                return;
+            }
+            let mode = match codec.GetValue(&CODECAPI_AVEncCommonRateControlMode) {
+                Ok(got) => Some((*got.Anonymous.Anonymous).Anonymous.ulVal),
+                Err(_) => None,
+            };
+            if failed.is_empty() {
+                eprintln!("encoder[{label}]: calidad aplicada (VBR mean={mean_bitrate} pico={} gop={gop}); rate control leído={mode:?} (1=VBR)", peak_bitrate(mean_bitrate));
+            } else {
+                eprintln!("encoder[{label}]: ajustes rechazados {failed:?}; rate control leído={mode:?} (1=VBR)");
+            }
         }
     }
 
