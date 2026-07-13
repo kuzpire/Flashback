@@ -67,11 +67,11 @@
     class="wm-toggle"
     class:on={enabled}
     aria-pressed={enabled}
+    aria-label={t('ed.watermark')}
     title={t('ed.watermarkOn')}
     onclick={toggle}
   >
-    <span class="wm-label">{t('ed.watermark')}</span>
-    <span class="wm-switch"><span class="wm-knob"></span></span>
+    <span class="wm-logo"></span>
   </button>
 </div>
 
@@ -98,35 +98,27 @@
     background: var(--bg-hover);
     color: var(--text-0);
   }
+  /* Activo: el botón entero es el interruptor, se colorea de blanco (como Exportar). */
   .wm-toggle.on {
-    color: var(--text-0);
-  }
-
-  .wm-switch {
-    flex-shrink: 0;
-    width: 30px;
-    height: 17px;
-    border-radius: 999px;
-    background: var(--bg-3);
-    border: 1px solid var(--line);
-    padding: 2px;
-    transition: background 0.18s ease, border-color 0.18s ease;
-  }
-  .wm-knob {
-    display: block;
-    width: 11px;
-    height: 11px;
-    border-radius: 999px;
-    background: var(--text-2);
-    transition: transform 0.18s ease, background 0.18s ease;
-  }
-  .wm-toggle.on .wm-switch {
     background: var(--bright);
+    color: var(--bg-0);
     border-color: transparent;
+    font-weight: 600;
   }
-  .wm-toggle.on .wm-knob {
-    transform: translateX(13px);
-    background: var(--bg-1);
+  .wm-toggle.on:hover {
+    background: var(--bright);
+    color: var(--bg-0);
+    opacity: 0.9;
+  }
+  /* Logo de Flashback (isotipo mono) como máscara: se recolorea con currentColor, así sigue el
+     color del botón (claro inactivo, negro cuando está activo sobre el fondo blanco). */
+  .wm-logo {
+    display: block;
+    width: 16px;
+    height: 16px;
+    background-color: currentColor;
+    -webkit-mask: url('/flashback-mono.svg') center / contain no-repeat;
+    mask: url('/flashback-mono.svg') center / contain no-repeat;
   }
 
   /* Popover: 4 mini-pantallas con la esquina resaltada, encima del interruptor.
