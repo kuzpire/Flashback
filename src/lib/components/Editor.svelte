@@ -1035,7 +1035,7 @@
     <div class="fs-progress" class:hidden={!fsCtrlShow} onmousedown={onFsProgDown}>
       <div class="fs-progress-track">
         <div class="fs-progress-fill" style="width: {outFrac * 100}%"></div>
-        <div class="fs-progress-knob" style="left: {outFrac * 100}%"></div>
+        <div class="fs-progress-knob" style="left: {outFrac * 100}%"><span class="thumb-line"></span></div>
       </div>
     </div>
     <div class="fs-controls" class:hidden={!fsCtrlShow}>
@@ -1321,7 +1321,7 @@
   .fs-controls {
     position: fixed;
     left: 50%;
-    bottom: 40px;
+    bottom: 58px;
     transform: translateX(-50%);
     display: flex;
     align-items: center;
@@ -1335,16 +1335,15 @@
     z-index: 10000;
     transition: opacity 0.25s ease;
   }
-  /* Barra de progreso de fullscreen: pista a lo ancho pegada abajo, arrastrable para buscar. */
+  /* Barra de progreso de fullscreen: flotante, separada de los bordes, arrastrable para buscar. */
   .fs-progress {
     position: fixed;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    height: 26px;
+    left: 40px;
+    right: 40px;
+    bottom: 20px;
+    height: 22px;
     display: flex;
-    align-items: flex-end;
-    padding-bottom: 9px;
+    align-items: center;
     cursor: pointer;
     z-index: 10000;
     transition: opacity 0.25s ease;
@@ -1352,25 +1351,29 @@
   .fs-progress-track {
     position: relative;
     width: 100%;
-    height: 5px;
+    height: 6px;
+    border-radius: 999px;
     background: rgba(255, 255, 255, 0.25);
   }
-  .fs-progress:hover .fs-progress-track { height: 7px; }
+  .fs-progress:hover .fs-progress-track { height: 8px; }
   .fs-progress-fill {
     position: absolute;
     left: 0;
     top: 0;
     bottom: 0;
+    border-radius: 999px;
     background: #fff;
   }
   .fs-progress-knob {
     position: absolute;
     top: 50%;
-    width: 13px;
-    height: 13px;
-    border-radius: 50%;
+    display: grid;
+    place-items: center;
+    width: 16px;
+    height: 20px;
+    border-radius: 5px;
     background: #fff;
-    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.55);
     transform: translate(-50%, -50%);
     pointer-events: none;
   }
