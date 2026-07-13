@@ -1030,15 +1030,15 @@
     </button>
   {/snippet}
 
-  {#if fs}
+  {#if fs && fsCtrlShow}
     <!-- svelte-ignore a11y_no_static_element_interactions -->
-    <div class="fs-progress" class:hidden={!fsCtrlShow} onmousedown={onFsProgDown}>
+    <div class="fs-progress" onmousedown={onFsProgDown}>
       <div class="fs-progress-track">
         <div class="fs-progress-fill" style="width: {outFrac * 100}%"></div>
         <div class="fs-progress-knob" style="left: {outFrac * 100}%"><span class="thumb-line"></span></div>
       </div>
     </div>
-    <div class="fs-controls" class:hidden={!fsCtrlShow}>
+    <div class="fs-controls">
       {@render transportButtons()}
     </div>
   {/if}
@@ -1333,7 +1333,6 @@
     border-radius: 16px;
     box-shadow: 0 16px 44px rgba(0, 0, 0, 0.55);
     z-index: 10000;
-    transition: opacity 0.25s ease;
   }
   /* Barra de progreso de fullscreen: flotante, separada de los bordes, arrastrable para buscar. */
   .fs-progress {
@@ -1346,7 +1345,6 @@
     align-items: center;
     cursor: grab;
     z-index: 10000;
-    transition: opacity 0.25s ease;
   }
   .fs-progress:active { cursor: grabbing; }
   .fs-progress-track {
@@ -1378,11 +1376,6 @@
     pointer-events: none;
   }
   .fs-progress-knob .thumb-line { width: 10px; height: 2px; }
-  .fs-progress.hidden,
-  .fs-controls.hidden {
-    opacity: 0;
-    pointer-events: none;
-  }
   .stage video.nocursor {
     cursor: none;
   }
