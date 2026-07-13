@@ -1,5 +1,6 @@
 <script lang="ts">
   import Icon from './Icon.svelte';
+  import WatermarkToggle from './WatermarkToggle.svelte';
   import {
     editorState,
     closeEditor,
@@ -1106,6 +1107,7 @@
         <button class="act" disabled={editorState.segments.length <= 1} onclick={removeActive}>
           <Icon name="trash" size={14} /> {t('ed.remove')}
         </button>
+        <WatermarkToggle />
         <button class="act export" onclick={handleExport} disabled={editorState.exporting}>
           {editorState.exporting ? t('ed.exporting') : t('ed.export')}
           <Icon name="export" size={16} />

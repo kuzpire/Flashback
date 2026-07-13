@@ -199,6 +199,24 @@ pub fn set_discord_rpc(app: &tauri::AppHandle, on: bool) -> Result<(), String> {
     write_setting(app, "discord_rpc", serde_json::json!(on))
 }
 
+// Marca de agua en la exportación: opt-in, desactivada por defecto. La esquina se guarda como
+// "tl"/"tr"/"bl"/"br" (inferior-derecha por defecto). Solo la lee el export (editor.rs).
+pub fn get_watermark(app: &tauri::AppHandle) -> bool {
+    read_bool(app, "watermark").unwrap_or(false)
+}
+
+pub fn set_watermark(app: &tauri::AppHandle, on: bool) -> Result<(), String> {
+    write_setting(app, "watermark", serde_json::json!(on))
+}
+
+pub fn get_watermark_corner(app: &tauri::AppHandle) -> String {
+    read_setting(app, "watermark_corner").unwrap_or_else(|| "br".into())
+}
+
+pub fn set_watermark_corner(app: &tauri::AppHandle, corner: &str) -> Result<(), String> {
+    write_setting(app, "watermark_corner", serde_json::json!(corner))
+}
+
 // Idioma de la interfaz: "en" por defecto. Lo lee también el backend (estados del RPC).
 pub fn get_language(app: &tauri::AppHandle) -> String {
     read_setting(app, "language").unwrap_or_else(|| "en".into())

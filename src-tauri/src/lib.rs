@@ -13,6 +13,7 @@ mod overlay;
 mod thumbnail;
 #[cfg(target_os = "windows")]
 mod toast;
+mod watermark;
 
 #[tauri::command]
 async fn game_hero(
@@ -92,6 +93,26 @@ fn get_language(app: tauri::AppHandle) -> String {
 #[tauri::command]
 fn set_language(app: tauri::AppHandle, lang: String) -> Result<(), String> {
     config::set_language(&app, &lang)
+}
+
+#[tauri::command]
+fn get_watermark(app: tauri::AppHandle) -> bool {
+    config::get_watermark(&app)
+}
+
+#[tauri::command]
+fn set_watermark(app: tauri::AppHandle, on: bool) -> Result<(), String> {
+    config::set_watermark(&app, on)
+}
+
+#[tauri::command]
+fn get_watermark_corner(app: tauri::AppHandle) -> String {
+    config::get_watermark_corner(&app)
+}
+
+#[tauri::command]
+fn set_watermark_corner(app: tauri::AppHandle, corner: String) -> Result<(), String> {
+    config::set_watermark_corner(&app, &corner)
 }
 
 #[tauri::command]
@@ -234,8 +255,10 @@ async fn export_clip(
     edit: editor::ClipEdit,
 ) -> Result<(), String> {
     use tauri::Emitter;
+    // Marca de agua: solo si está activada. Se hornea únicamente aquí (export), nunca en captura.
+    let watermark = config::get_watermark(&app).then(|| config::get_watermark_corner(&app));
     tokio::task::spawn_blocking(move || {
-        editor::export_clip(src, dst, edit, move |p: f32| {
+        editor::export_clip(src, dst, edit, watermark, move |p: f32| {
             let _ = app.emit("export-progress", p);
         })
     })
@@ -484,6 +507,10 @@ pub fn run() {
             clip_thumbnail,
             capture_frame,
             export_clip,
+            get_watermark,
+            set_watermark,
+            get_watermark_corner,
+            set_watermark_corner,
             rename_clip,
             delete_clip,
             start_replay,

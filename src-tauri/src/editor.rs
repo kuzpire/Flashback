@@ -119,7 +119,7 @@ pub fn export_clip<F: Fn(f32)>(_src: String, _dst: String, _edit: ClipEdit, _pro
 mod win {
     use std::sync::Once;
 
-    use windows::core::{Result, GUID, HSTRING};
+    use windows::core::{Interface, Result, GUID, HSTRING};
     use windows::Win32::Media::MediaFoundation::*;
     use windows::Win32::System::Com::StructuredStorage::PROPVARIANT;
     use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_MULTITHREADED};
@@ -465,12 +465,13 @@ mod win {
         src: String,
         dst: String,
         edit: ClipEdit,
+        watermark: Option<String>,
         progress: F,
     ) -> std::result::Result<(), String> {
         std::thread::spawn(move || {
             unsafe { let _ = CoInitializeEx(None, COINIT_MULTITHREADED); }
             ensure_mf();
-            let r = do_export(&src, &dst, &edit, &progress);
+            let r = do_export(&src, &dst, &edit, watermark.as_deref(), &progress);
             unsafe { CoUninitialize(); }
             // El clip editado hereda el origen del original (juego/monitor) embebiéndolo igual que
             // en la captura, para que conserve su etiqueta en la biblioteca.
@@ -543,10 +544,39 @@ mod win {
     // primer frame y lo mostraba en negro. Recodificar todo con un encoder es además más rápido
     // que el camino anterior (HW + seek, sin pasadas desde el inicio del archivo). El recorte
     // sigue siendo exacto al frame: el primer fotograma conservado de cada tramo se vuelve IDR.
+    // Hornea la marca de agua sobre el frame RGB32 (BGRA) en sitio. Best-effort: si no se puede
+    // bloquear el buffer, se escribe el frame sin marca. Usa IMF2DBuffer para el stride real (con
+    // signo: negativo si el buffer es bottom-up); si no lo soporta, asume top-down (ancho*4).
+    fn blend_watermark(sample: &IMFSample, logo: &crate::watermark::Logo, w: u32, h: u32) {
+        unsafe {
+            let Ok(buf) = sample.GetBufferByIndex(0) else { return };
+            if let Ok(b2) = buf.cast::<IMF2DBuffer>() {
+                let mut scan0: *mut u8 = std::ptr::null_mut();
+                let mut pitch: i32 = 0;
+                if b2.Lock2D(&mut scan0, &mut pitch).is_ok() {
+                    if !scan0.is_null() {
+                        logo.blend(scan0, pitch as isize, w, h);
+                    }
+                    let _ = b2.Unlock2D();
+                    return;
+                }
+            }
+            let mut ptr: *mut u8 = std::ptr::null_mut();
+            let mut cur = 0u32;
+            if buf.Lock(&mut ptr, None, Some(&mut cur)).is_ok() {
+                if !ptr.is_null() {
+                    logo.blend(ptr, (w as isize) * 4, w, h);
+                }
+                let _ = buf.Unlock();
+            }
+        }
+    }
+
     fn do_export(
         src: &str,
         dst: &str,
         edit: &ClipEdit,
+        watermark: Option<&str>,
         progress: &dyn Fn(f32),
     ) -> std::result::Result<(), String> {
         let mf = |e: windows::core::Error| format!("{e:?}");
@@ -555,6 +585,18 @@ mod win {
             return Err("No hay segmentos para exportar".into());
         }
         let meta = read_video_meta(src).map_err(mf)?;
+
+        // Marca de agua: se rasteriza una vez al tamaño de salida. Best-effort: si falla, se exporta
+        // sin marca (no se rompe el export). El blend por frame va más abajo, antes de WriteSample.
+        let logo = watermark.and_then(|c| {
+            match crate::watermark::Logo::rasterize(meta.width, meta.height, crate::watermark::Corner::parse(c)) {
+                Ok(l) => Some(l),
+                Err(e) => {
+                    eprintln!("watermark: rasterización falló, exporto sin marca: {e:?}");
+                    None
+                }
+            }
+        });
         let keyframes = keyframe_times_inner(src)?;
         let frame_dur = (10_000_000 / meta.fps.max(1) as i64).max(1);
 
@@ -691,6 +733,9 @@ mod win {
                 // Re-tiempo al hueco eliminado, idéntico al del audio: los tramos se concatenan sin
                 // huecos en la salida (mismo mapeo origen→salida que el audio para mantener el sync).
                 let out_t = (t - start_hns) + kept_before;
+                if let Some(logo) = &logo {
+                    blend_watermark(&sample, logo, meta.width, meta.height);
+                }
                 unsafe {
                     sample.SetSampleTime(out_t).map_err(mf)?;
                     sample.SetSampleDuration(frame_dur).map_err(mf)?;
