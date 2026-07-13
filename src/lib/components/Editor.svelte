@@ -1344,10 +1344,11 @@
     height: 22px;
     display: flex;
     align-items: center;
-    cursor: pointer;
+    cursor: grab;
     z-index: 10000;
     transition: opacity 0.25s ease;
   }
+  .fs-progress:active { cursor: grabbing; }
   .fs-progress-track {
     position: relative;
     width: 100%;
@@ -1355,7 +1356,6 @@
     border-radius: 999px;
     background: rgba(255, 255, 255, 0.25);
   }
-  .fs-progress:hover .fs-progress-track { height: 8px; }
   .fs-progress-fill {
     position: absolute;
     left: 0;
@@ -1369,14 +1369,15 @@
     top: 50%;
     display: grid;
     place-items: center;
-    width: 16px;
-    height: 20px;
+    width: 22px;
+    height: 16px;
     border-radius: 5px;
     background: #fff;
     box-shadow: 0 2px 6px rgba(0, 0, 0, 0.55);
     transform: translate(-50%, -50%);
     pointer-events: none;
   }
+  .fs-progress-knob .thumb-line { width: 10px; height: 2px; }
   .fs-progress.hidden,
   .fs-controls.hidden {
     opacity: 0;
