@@ -1025,7 +1025,7 @@ checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
 name = "flashback"
-version = "1.5.1"
+version = "1.6.0"
 dependencies = [
  "base64 0.22.1",
  "discord-rich-presence",

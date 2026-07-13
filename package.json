@@ -1,6 +1,6 @@
 {
   "name": "flashback",
-  "version": "1.5.1",
+  "version": "1.6.0",
   "description": "Captura y edición ligera de clips de juego para Windows",
   "type": "module",
   "scripts": {
