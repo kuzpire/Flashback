@@ -1021,11 +1021,18 @@ mod win {
             sys: Option<(u32, u16)>,
             mic: Option<(u32, u16)>,
         ) {
+            // El guardado ancla el clip al IDR anterior al inicio de la ventana (hasta ~1 GOP
+            // atrás), así que el audio debe conservar historia hasta ahí; con la misma ventana que
+            // el vídeo, su paquete más antiguo cae en el inicio de la ventana y el clip arranca con
+            // vídeo pero sin audio. Se le da al audio la ventana de vídeo + un GOP + margen; el
+            // exceso lo descarta el muxer (paquetes con time < base). Coste: ~1,5 s extra de AAC.
+            let gop_ns = self.fps.max(8) as i64 * 10_000_000 / self.fps.max(1) as i64;
+            let audio_window = self.window_ns + gop_ns + 5_000_000;
             if let Some((rate, ch)) = sys {
-                self.sys_audio = Some(AudioTrackBuf::new(rate, ch, aac_bitrate(ch), self.window_ns));
+                self.sys_audio = Some(AudioTrackBuf::new(rate, ch, aac_bitrate(ch), audio_window));
             }
             if let Some((rate, ch)) = mic {
-                self.mic_audio = Some(AudioTrackBuf::new(rate, ch, aac_bitrate(ch), self.window_ns));
+                self.mic_audio = Some(AudioTrackBuf::new(rate, ch, aac_bitrate(ch), audio_window));
             }
         }
 
@@ -3836,6 +3843,39 @@ mod win {
             // Hueco grande (>8 intervalos: juego minimizado/congelado): reancla al tiempo real.
             assert!(keep_frame(&next, 2000, interval));
             assert_eq!(next.load(Ordering::Relaxed), 2100);
+        }
+
+        // El guardado ancla el clip al IDR anterior al inicio de la ventana (hasta ~1 GOP atrás).
+        // El ring de audio debe conservar historia hasta ese keyframe; si no, el clip arranca con
+        // vídeo pero sin audio (el hueco de "el primer medio segundo").
+        #[test]
+        fn audio_reaches_back_to_video_anchor_keyframe() {
+            let fps = 20u32;
+            let mut buf = ReplayBuffer::new(2, 1920, 1080, fps, 8_000_000); // ventana 2 s
+            buf.init_audio(Some((48_000, 2)), None);
+
+            let vframe = 10_000_000 / fps as i64; // 1/fps en unidades de 100 ns
+            let gop = fps as i64; // keyframe cada ~1 s
+            // 5,5 s de vídeo: fuerza la poda con el cutoff cayendo entre dos keyframes.
+            let nframes = fps as i64 * 55 / 10;
+            for i in 0..nframes {
+                buf.push(vec![0u8; 16], i * vframe, vframe, i % gop == 0);
+            }
+            // Audio continuo (~21 ms por paquete AAC a 48 kHz) sobre el mismo lapso.
+            let aframe = 1024 * 10_000_000 / 48_000;
+            let mut t = 0i64;
+            while t <= (nframes - 1) * vframe {
+                buf.push_audio(AudioRole::Sys, vec![0u8; 8], t, aframe);
+                t += aframe;
+            }
+
+            let anchor = buf.packets.iter().find(|p| p.key).map(|p| p.time).unwrap();
+            let earliest_audio = buf.sys_audio.as_ref().unwrap().packets.front().unwrap().time;
+            assert!(
+                earliest_audio <= anchor,
+                "audio arranca en {earliest_audio} pero el clip se ancla al keyframe {anchor}: \
+                 hueco inicial sin audio",
+            );
         }
     }
 }
