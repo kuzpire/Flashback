@@ -16,9 +16,9 @@ mod win {
     use windows::Win32::Graphics::Direct2D::Common::{D2D_SIZE_F, D2D_SIZE_U};
     use windows::Win32::Graphics::Direct2D::{
         D2D1CreateDevice, ID2D1Bitmap1, ID2D1DeviceContext, ID2D1DeviceContext5,
-        ID2D1SolidColorBrush, D2D1_BITMAP_OPTIONS_CANNOT_DRAW, D2D1_BITMAP_OPTIONS_TARGET,
-        D2D1_BITMAP_PROPERTIES1, D2D1_DEVICE_CONTEXT_OPTIONS_NONE, D2D1_DRAW_TEXT_OPTIONS_NONE,
-        D2D1_INTERPOLATION_MODE_LINEAR, D2D1_ROUNDED_RECT,
+        ID2D1SolidColorBrush, D2D1_ANTIALIAS_MODE_ALIASED, D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+        D2D1_BITMAP_OPTIONS_TARGET, D2D1_BITMAP_PROPERTIES1, D2D1_DEVICE_CONTEXT_OPTIONS_NONE,
+        D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_INTERPOLATION_MODE_LINEAR, D2D1_ROUNDED_RECT,
     };
     use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
     use windows::Win32::Graphics::Direct3D11::{
@@ -107,15 +107,16 @@ mod win {
         1.0 - (1.0 - p).powi(3)
     }
 
-    const TAB_H: f32 = 76.0;
+    const TAB_H: f32 = 78.0;
     const CORNER: f32 = 8.0;
     const TOP_MARGIN: f32 = 12.0;
-    const TEXT_LEFT: f32 = 44.0;
-    const RIGHT_PAD: f32 = 24.0;
-    const TITLE_TOP: f32 = 17.0;
-    const TITLE_LINE: f32 = 22.0;
-    const BODY_TOP: f32 = 39.0;
-    const BODY_LINE: f32 = 20.0;
+    const TEXT_LEFT: f32 = 60.0;
+    const RIGHT_PAD: f32 = 26.0;
+    const TITLE_TOP: f32 = 16.0;
+    const TITLE_LINE: f32 = 24.0;
+    const BODY_TOP: f32 = 40.0;
+    const BODY_LINE: f32 = 22.0;
+    const BAR_W: f32 = 4.0;
 
     const MARK_SVG: &str = include_str!("../../static/flashback-mono.svg");
 
@@ -223,6 +224,8 @@ mod win {
         title_error: ID2D1SolidColorBrush,
         chip_bg: ID2D1SolidColorBrush,
         chip_text: ID2D1SolidColorBrush,
+        bar: ID2D1SolidColorBrush,
+        border: ID2D1SolidColorBrush,
         mark: ID2D1Bitmap1,
         dcomp: IDCompositionDevice,
         _target: IDCompositionTarget,
@@ -260,9 +263,9 @@ mod win {
             let ctx = d2d_device.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)?;
             let brush = ctx.CreateSolidColorBrush(
                 &D2D1_COLOR_F {
-                    r: 0x14 as f32 / 255.0,
-                    g: 0x14 as f32 / 255.0,
-                    b: 0x16 as f32 / 255.0,
+                    r: 0x08 as f32 / 255.0,
+                    g: 0x08 as f32 / 255.0,
+                    b: 0x08 as f32 / 255.0,
                     a: 0.98,
                 },
                 None,
@@ -275,7 +278,7 @@ mod win {
                 DWRITE_FONT_WEIGHT_SEMI_BOLD,
                 DWRITE_FONT_STYLE_NORMAL,
                 DWRITE_FONT_STRETCH_NORMAL,
-                15.0,
+                18.0,
                 w!("en-us"),
             )?;
             title_format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING)?;
@@ -286,7 +289,7 @@ mod win {
                 DWRITE_FONT_WEIGHT_NORMAL,
                 DWRITE_FONT_STYLE_NORMAL,
                 DWRITE_FONT_STRETCH_NORMAL,
-                13.0,
+                15.0,
                 w!("en-us"),
             )?;
             body_format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING)?;
@@ -297,7 +300,7 @@ mod win {
                 DWRITE_FONT_WEIGHT_SEMI_BOLD,
                 DWRITE_FONT_STYLE_NORMAL,
                 DWRITE_FONT_STRETCH_NORMAL,
-                11.5,
+                12.5,
                 w!("en-us"),
             )?;
             chip_format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
@@ -305,19 +308,19 @@ mod win {
 
             let text_bright = ctx.CreateSolidColorBrush(
                 &D2D1_COLOR_F {
-                    r: 0xf0 as f32 / 255.0,
-                    g: 0xf2 as f32 / 255.0,
-                    b: 0xf7 as f32 / 255.0,
+                    r: 1.0,
+                    g: 1.0,
+                    b: 1.0,
                     a: 1.0,
                 },
                 None,
             )?;
             let text_dim = ctx.CreateSolidColorBrush(
                 &D2D1_COLOR_F {
-                    r: 0xf0 as f32 / 255.0,
-                    g: 0xf2 as f32 / 255.0,
-                    b: 0xf7 as f32 / 255.0,
-                    a: 0.72,
+                    r: 0xc8 as f32 / 255.0,
+                    g: 0xcf as f32 / 255.0,
+                    b: 0xda as f32 / 255.0,
+                    a: 1.0,
                 },
                 None,
             )?;
@@ -348,6 +351,24 @@ mod win {
                 },
                 None,
             )?;
+            let bar = ctx.CreateSolidColorBrush(
+                &D2D1_COLOR_F {
+                    r: 1.0,
+                    g: 1.0,
+                    b: 1.0,
+                    a: 0.88,
+                },
+                None,
+            )?;
+            let border = ctx.CreateSolidColorBrush(
+                &D2D1_COLOR_F {
+                    r: 0x34 as f32 / 255.0,
+                    g: 0x34 as f32 / 255.0,
+                    b: 0x36 as f32 / 255.0,
+                    a: 1.0,
+                },
+                None,
+            )?;
 
             let mark = load_mark(&ctx, monitor_scale(primary_monitor()))?;
 
@@ -370,6 +391,8 @@ mod win {
                 title_error,
                 chip_bg,
                 chip_text,
+                bar,
+                border,
                 mark,
                 dcomp,
                 _target: target,
@@ -419,6 +442,8 @@ mod win {
             self.title_error.SetOpacity(opacity);
             self.chip_bg.SetOpacity(opacity);
             self.chip_text.SetOpacity(opacity);
+            self.bar.SetOpacity(opacity);
+            self.border.SetOpacity(opacity);
 
             let surface = self.surface.as_ref().unwrap();
             let mut offset = POINT::default();
@@ -459,8 +484,38 @@ mod win {
             }));
             self.ctx.FillRoundedRectangle(&rect, &self.brush);
 
+            // Hairline de 1px para despegar la tarjeta casi negra de escenas oscuras. El trazo va
+            // centrado en el borde, así que se insetan 0.5px para que caiga dentro; el lado derecho
+            // se sale de la superficie (esquinas recortadas) y no se ve.
+            let bw = 1.0 * scale;
+            let border_rect = D2D1_ROUNDED_RECT {
+                rect: D2D_RECT_F {
+                    left: ox + bw * 0.5,
+                    top: oy + bw * 0.5,
+                    right: ox + w as f32 + radius,
+                    bottom: oy + h as f32 - bw * 0.5,
+                },
+                radiusX: radius - bw * 0.5,
+                radiusY: radius - bw * 0.5,
+            };
+            self.ctx.DrawRoundedRectangle(&border_rect, &self.border, bw, None);
+
+            // Barra de acento en el borde izquierdo, estilo Moments: se repinta el mismo rectángulo
+            // redondeado pero recortado a un ancho fijo, así comparte el radio de la esquina
+            // izquierda y queda recto por la derecha. Va encima del hairline para tapar su tramo
+            // izquierdo y dejar el borde de la tarjeta limpio.
+            let bar = D2D_RECT_F {
+                left: ox,
+                top: oy,
+                right: ox + BAR_W * scale,
+                bottom: oy + h as f32,
+            };
+            self.ctx.PushAxisAlignedClip(&bar, D2D1_ANTIALIAS_MODE_ALIASED);
+            self.ctx.FillRoundedRectangle(&rect, &self.bar);
+            self.ctx.PopAxisAlignedClip();
+
             let mark_size = 28.0 * scale;
-            let mark_left = ox + 12.0 * scale;
+            let mark_left = ox + 16.0 * scale;
             let mark_top = oy + (h as f32 - mark_size) / 2.0;
             let mark_rect = D2D_RECT_F {
                 left: mark_left,
@@ -506,8 +561,8 @@ mod win {
                 if !data.keys.is_empty() {
                     let gap = 4.0 * scale;
                     let pad_x = 7.0 * scale;
-                    let chip_h = 18.0 * scale;
-                    let chip_radius = 4.0 * scale;
+                    let chip_h = 20.0 * scale;
+                    let chip_radius = 5.0 * scale;
                     let center_y = oy + (BODY_TOP + BODY_LINE / 2.0) * scale;
                     let plus: Vec<u16> = "+".encode_utf16().collect();
                     let plus_w = self.line_width(&plus, &self.body_format);
