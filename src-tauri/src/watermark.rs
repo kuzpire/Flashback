@@ -27,7 +27,7 @@ impl Corner {
 
 // Alto del logo respecto al alto del vídeo, opacidad y margen a los bordes. Defaults fijos: la UI
 // solo expone on/off y la esquina (mejores defaults > más opciones).
-const HEIGHT_FRAC: f32 = 0.07;
+const HEIGHT_FRAC: f32 = 0.055;
 const OPACITY: f32 = 0.70;
 const MARGIN_FRAC: f32 = 0.03;
 

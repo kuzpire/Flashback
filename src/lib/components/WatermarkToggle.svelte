@@ -2,7 +2,6 @@
   import { invoke } from '@tauri-apps/api/core';
   import { onMount } from 'svelte';
   import { t } from '$lib/i18n.svelte';
-  import Icon from './Icon.svelte';
 
   let enabled = $state(false);
   let corner = $state('br');
@@ -43,22 +42,24 @@
   onmouseleave={() => (hovering = false)}
 >
   {#if enabled && hovering}
-    <div class="wm-pop" role="radiogroup" aria-label={t('ed.watermarkPos')}>
-      {#each corners as c (c)}
-        <button
-          class="wm-screen"
-          class:sel={corner === c}
-          role="radio"
-          aria-checked={corner === c}
-          aria-label={c}
-          onclick={(e) => pick(e, c)}
-        >
-          <span
-            class="wm-dot"
-            style="{c[0] === 't' ? 'top' : 'bottom'}: 3px; {c[1] === 'l' ? 'left' : 'right'}: 3px;"
-          ></span>
-        </button>
-      {/each}
+    <div class="wm-pop">
+      <div class="wm-pop-inner" role="radiogroup" aria-label={t('ed.watermarkPos')}>
+        {#each corners as c (c)}
+          <button
+            class="wm-screen"
+            class:sel={corner === c}
+            role="radio"
+            aria-checked={corner === c}
+            aria-label={c}
+            onclick={(e) => pick(e, c)}
+          >
+            <span
+              class="wm-dot"
+              style="{c[0] === 't' ? 'top' : 'bottom'}: 3px; {c[1] === 'l' ? 'left' : 'right'}: 3px;"
+            ></span>
+          </button>
+        {/each}
+      </div>
     </div>
   {/if}
 
@@ -69,7 +70,6 @@
     title={t('ed.watermarkOn')}
     onclick={toggle}
   >
-    <Icon name="watermark" size={14} />
     <span class="wm-label">{t('ed.watermark')}</span>
     <span class="wm-switch"><span class="wm-knob"></span></span>
   </button>
@@ -129,12 +129,19 @@
     background: var(--bg-1);
   }
 
-  /* Popover: 4 mini-pantallas con la esquina resaltada, encima del interruptor. */
+  /* Popover: 4 mini-pantallas con la esquina resaltada, encima del interruptor.
+     .wm-pop es un puente transparente que llega hasta el interruptor (padding), para que al
+     mover el ratón hacia las opciones desde un lado no se cruce un hueco sin hover y se cierre. */
   .wm-pop {
     position: absolute;
-    bottom: calc(100% + 8px);
+    bottom: 100%;
     left: 50%;
     transform: translateX(-50%);
+    padding: 0 12px 9px;
+    z-index: 30;
+  }
+  .wm-pop-inner {
+    position: relative;
     display: grid;
     grid-template-columns: repeat(2, auto);
     gap: 6px;
@@ -143,9 +150,8 @@
     border: 1px solid var(--line);
     border-radius: var(--r-sm);
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
-    z-index: 30;
   }
-  .wm-pop::after {
+  .wm-pop-inner::after {
     content: '';
     position: absolute;
     top: 100%;
