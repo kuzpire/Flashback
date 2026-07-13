@@ -29,6 +29,10 @@
   let micAudio = $state<HTMLAudioElement | null>(null);
 
   let playing = $state(false);
+  // PTS exacto (segundos) del fotograma que el <video> muestra ahora mismo, vía
+  // requestVideoFrameCallback. currentTime cae entre fotogramas al pausar y la captura salía
+  // del de al lado; este es el que está pintado.
+  let shownMediaTime = 0;
   let fs = $state(false);
   let outPos = $state(0); // posición en el tiempo de salida (ms)
   let playIndex = 0; // segmento que se está reproduciendo
@@ -229,6 +233,29 @@
   $effect(() => () => {
     cancelAnimationFrame(raf);
     clearLiftTimer();
+  });
+
+  // Rastrea el fotograma mostrado: rVFC dispara en cada frame pintado (también tras un seek o
+  // paso a paso estando en pausa), así shownMediaTime es siempre el PTS del frame visible.
+  type VfcMeta = { mediaTime: number };
+  type VfcVideo = HTMLVideoElement & {
+    requestVideoFrameCallback?: (cb: (now: number, meta: VfcMeta) => void) => number;
+    cancelVideoFrameCallback?: (handle: number) => void;
+  };
+  $effect(() => {
+    const v = video as VfcVideo | null;
+    if (!v || typeof v.requestVideoFrameCallback !== 'function') return;
+    let handle = 0;
+    let alive = true;
+    const cb = (_now: number, meta: VfcMeta) => {
+      shownMediaTime = meta.mediaTime;
+      if (alive) handle = v.requestVideoFrameCallback!(cb);
+    };
+    handle = v.requestVideoFrameCallback(cb);
+    return () => {
+      alive = false;
+      v.cancelVideoFrameCallback?.(handle);
+    };
   });
 
   function seekSource(srcMs: number) {
@@ -790,7 +817,9 @@
   async function screenshot() {
     if (!video) return;
     try {
-      const dst = await captureFrame(video.currentTime * 1000);
+      const supportsVfc = typeof (video as VfcVideo).requestVideoFrameCallback === 'function';
+      const atMs = (supportsVfc ? shownMediaTime : video.currentTime) * 1000;
+      const dst = await captureFrame(atMs);
       if (!dst) return;
       // Copia automática al portapapeles leyendo el PNG ya guardado (sin canvas, que se "ensucia"
       // con el protocolo asset). Si falla, la captura igual queda guardada en disco.
