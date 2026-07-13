@@ -20,7 +20,7 @@
   import { formatSize } from '$lib/clips';
   import { t, localeTag } from '$lib/i18n.svelte';
   import { refreshLibrary } from '$lib/library.svelte';
-  import { revealItemInDir } from '@tauri-apps/plugin-opener';
+  import { revealItemInDir, openPath } from '@tauri-apps/plugin-opener';
   import { convertFileSrc } from '@tauri-apps/api/core';
   import { getCurrentWindow } from '@tauri-apps/api/window';
 
@@ -803,7 +803,7 @@
       } catch (err) {
         console.error('clipboard', err);
       }
-      setNotice(copied ? t('ed.shotCopied', { name: name ?? '' }) : t('ed.shotSaved', { name: name ?? '' }), 4000);
+      showShotToast(dst, copied ? t('ed.shotCopied', { name: name ?? '' }) : t('ed.shotSaved', { name: name ?? '' }));
     } catch (e) {
       setNotice(t('ed.shotError', { e: String(e) }), 5000);
       console.error('capture', e);
@@ -828,6 +828,18 @@
     notice = msg;
     if (noticeTimer) clearTimeout(noticeTimer);
     noticeTimer = setTimeout(() => (notice = null), ms);
+  }
+
+  // Toast de captura: mensaje + enlace "abrir" que abre la imagen con la app por defecto del SO.
+  let shotToast = $state<{ path: string; text: string } | null>(null);
+  let shotToastTimer: ReturnType<typeof setTimeout> | null = null;
+  function showShotToast(path: string, text: string) {
+    shotToast = { path, text };
+    if (shotToastTimer) clearTimeout(shotToastTimer);
+    shotToastTimer = setTimeout(() => (shotToast = null), 6000);
+  }
+  function openShot() {
+    if (shotToast) openPath(shotToast.path).catch((e) => console.error('openPath', e));
   }
 
   async function close() {
@@ -1187,6 +1199,14 @@
 
   {#if notice}
     <div class="notice mono">{notice}</div>
+  {/if}
+
+  {#if shotToast}
+    <div class="shot-toast" class:fs>
+      <span class="shot-check"><Icon name="check" size={15} /></span>
+      <span class="shot-msg">{shotToast.text}</span>
+      <button class="shot-open" onclick={openShot}>{t('ed.shotOpen')}</button>
+    </div>
   {/if}
 
   {#if bubble}
@@ -1733,6 +1753,35 @@
     text-align: center;
     pointer-events: none;
   }
+
+  /* Toast de captura: sobre los controles (más arriba en fullscreen, sobre la píldora). */
+  .shot-toast {
+    position: fixed;
+    left: 50%;
+    bottom: 104px;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 9px 15px;
+    font-size: 12.5px;
+    background: rgba(18, 18, 20, 0.94);
+    backdrop-filter: blur(14px);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 12px;
+    box-shadow: 0 14px 38px rgba(0, 0, 0, 0.5);
+    z-index: 10001;
+  }
+  .shot-toast.fs { bottom: 124px; }
+  .shot-check { display: grid; place-items: center; color: #4ccf7a; }
+  .shot-msg { color: var(--text-1); }
+  .shot-open {
+    color: #4c8dff;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .shot-open:hover { text-decoration: underline; }
 
   /* Card del mezclador: píldora flotante en el gutter, alineada con las lanes de audio. Dos filas
      horizontales (sistema arriba, micrófono abajo), cada una a la altura de su onda (50px, gap 7).

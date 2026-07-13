@@ -245,6 +245,7 @@ const en: Record<string, string> = {
   'ed.shotCopied': 'Frame copied and saved: {name}',
   'ed.shotSaved': 'Frame saved: {name}',
   'ed.shotError': 'Error capturing: {e}',
+  'ed.shotOpen': 'Click here to open',
   'ed.exported': 'Exported: {name}',
   'ed.exportError': 'Error exporting: {e}',
 
@@ -461,6 +462,7 @@ const es: Record<string, string> = {
   'ed.shotCopied': 'Captura copiada y guardada: {name}',
   'ed.shotSaved': 'Captura guardada: {name}',
   'ed.shotError': 'Error al capturar: {e}',
+  'ed.shotOpen': 'Clic aquí para abrir',
   'ed.exported': 'Exportado: {name}',
   'ed.exportError': 'Error al exportar: {e}',
 
