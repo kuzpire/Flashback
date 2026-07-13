@@ -42,7 +42,8 @@
   type Drag =
     | { kind: 'seek' }
     | { kind: 'trim'; index: number; edge: 'start' | 'end'; downX: number; origStart: number; origEnd: number }
-    | { kind: 'vol'; chan: 'sys' | 'mic'; rect: DOMRect };
+    | { kind: 'vol'; chan: 'sys' | 'mic'; rect: DOMRect }
+    | { kind: 'fsprog'; rect: DOMRect };
   let drag: Drag | null = null;
   let scrubbing = $state(false);
   // Activo mientras se recorta un borde: desactiva la transición de `left` de los bloques para que,
@@ -123,6 +124,9 @@
     if (!seg) return 0;
     return (seg.posMs + (srcMs - seg.startMs)) / total;
   });
+
+  // Progreso [0..1] sobre el clip final (salida), para la barra de fullscreen.
+  const outFrac = $derived(kept > 0 ? Math.min(1, outPos / kept) : 0);
 
   const segView = $derived.by(() => {
     if (total <= 0) return [] as { seg: Segment; index: number; left: number; width: number }[];
@@ -298,6 +302,7 @@
     playing = true;
     cancelAnimationFrame(raf);
     raf = requestAnimationFrame(tick);
+    if (fs) showFsCtrl();
   }
 
   function pause() {
@@ -306,6 +311,7 @@
     micAudio?.pause();
     playing = false;
     cancelAnimationFrame(raf);
+    if (fs) showFsCtrl();
   }
 
   function toggle() {
@@ -603,6 +609,7 @@
   }
 
   function onWinMove(e: MouseEvent) {
+    if (fs) showFsCtrl();
     if (dockDrag) {
       // Arrastrar hacia arriba agranda el dock (vídeo más pequeño) y al revés. Se deja un
       // mínimo para el dock y un mínimo de stage para que el vídeo nunca desaparezca.
@@ -626,6 +633,8 @@
       seekOutput(outFromClientX(e.clientX));
     } else if (drag.kind === 'vol') {
       setVol(drag.chan, e.clientX, drag.rect);
+    } else if (drag.kind === 'fsprog') {
+      seekOutput(fsProgFrac(e.clientX, drag.rect) * kept);
     } else if (drag.kind === 'trim') {
       const r = laneEl?.getBoundingClientRect();
       if (!r) return;
@@ -674,9 +683,40 @@
   // (el lienzo de fullscreen queda con tamaño equivocado). Poniendo la ventana nativa en
   // fullscreen el WebView cubre el monitor exacto y el vídeo (overlay .fs) lo llena bien.
   let wasMaximized = false;
+  // Controles de fullscreen visibles. Se ocultan al reproducir (tras un margen sin actividad)
+  // o cuando el ratón sale de la pantalla; reaparecen al mover el ratón o pausar.
+  let fsCtrlShow = $state(true);
+  let fsHideTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function scheduleFsHide() {
+    if (fsHideTimer) clearTimeout(fsHideTimer);
+    fsHideTimer = setTimeout(() => {
+      if (fs && playing) fsCtrlShow = false;
+    }, 2200);
+  }
+
+  function showFsCtrl() {
+    fsCtrlShow = true;
+    if (fsHideTimer) {
+      clearTimeout(fsHideTimer);
+      fsHideTimer = null;
+    }
+    if (playing) scheduleFsHide();
+  }
+
+  // Ratón fuera de la ventana (p. ej. otra pantalla): oculta los controles en fullscreen.
+  function onWinLeave() {
+    if (fs) fsCtrlShow = false;
+  }
 
   async function setFs(on: boolean) {
     fs = on;
+    fsCtrlShow = true;
+    if (fsHideTimer) {
+      clearTimeout(fsHideTimer);
+      fsHideTimer = null;
+    }
+    if (on && playing) scheduleFsHide();
     const win = getCurrentWindow();
     try {
       if (on) {
@@ -698,6 +738,19 @@
   function toggleFullscreen() {
     if (!video) return;
     setFs(!fs);
+  }
+
+  function fsProgFrac(clientX: number, rect: DOMRect): number {
+    return Math.max(0, Math.min(1, (clientX - rect.left) / Math.max(1, rect.width)));
+  }
+
+  function onFsProgDown(e: MouseEvent) {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    drag = { kind: 'fsprog', rect };
+    scrubbing = true;
+    seekOutput(fsProgFrac(e.clientX, rect) * kept);
   }
 
   function onKey(e: KeyboardEvent) {
@@ -890,6 +943,7 @@
 </script>
 
 <svelte:window onkeydown={onKey} onmousemove={onWinMove} onmouseup={onWinUp} />
+<svelte:document onmouseleave={onWinLeave} />
 
 <div class="overlay" bind:this={overlayEl}>
   <div class="sub-bar mono">
@@ -931,6 +985,7 @@
           src={editorState.videoSrc}
           playsinline
           class:fs
+          class:nocursor={fs && !fsCtrlShow}
           onloadedmetadata={onLoaded}
           onended={pause}
           onclick={toggle}
@@ -976,7 +1031,14 @@
   {/snippet}
 
   {#if fs}
-    <div class="fs-controls">
+    <!-- svelte-ignore a11y_no_static_element_interactions -->
+    <div class="fs-progress" class:hidden={!fsCtrlShow} onmousedown={onFsProgDown}>
+      <div class="fs-progress-track">
+        <div class="fs-progress-fill" style="width: {outFrac * 100}%"></div>
+        <div class="fs-progress-knob" style="left: {outFrac * 100}%"></div>
+      </div>
+    </div>
+    <div class="fs-controls" class:hidden={!fsCtrlShow}>
       {@render transportButtons()}
     </div>
   {/if}
@@ -1259,7 +1321,7 @@
   .fs-controls {
     position: fixed;
     left: 50%;
-    bottom: 30px;
+    bottom: 40px;
     transform: translateX(-50%);
     display: flex;
     align-items: center;
@@ -1271,6 +1333,54 @@
     border-radius: 16px;
     box-shadow: 0 16px 44px rgba(0, 0, 0, 0.55);
     z-index: 10000;
+    transition: opacity 0.25s ease;
+  }
+  /* Barra de progreso de fullscreen: pista a lo ancho pegada abajo, arrastrable para buscar. */
+  .fs-progress {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    height: 26px;
+    display: flex;
+    align-items: flex-end;
+    padding-bottom: 9px;
+    cursor: pointer;
+    z-index: 10000;
+    transition: opacity 0.25s ease;
+  }
+  .fs-progress-track {
+    position: relative;
+    width: 100%;
+    height: 5px;
+    background: rgba(255, 255, 255, 0.25);
+  }
+  .fs-progress:hover .fs-progress-track { height: 7px; }
+  .fs-progress-fill {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    background: #fff;
+  }
+  .fs-progress-knob {
+    position: absolute;
+    top: 50%;
+    width: 13px;
+    height: 13px;
+    border-radius: 50%;
+    background: #fff;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+    transform: translate(-50%, -50%);
+    pointer-events: none;
+  }
+  .fs-progress.hidden,
+  .fs-controls.hidden {
+    opacity: 0;
+    pointer-events: none;
+  }
+  .stage video.nocursor {
+    cursor: none;
   }
   /* Overlay de pantalla completa: la ventana nativa ya cubre el monitor, así que el vídeo se
      fija al viewport completo. object-fit:contain deja solo el letterbox real de su proporción. */
