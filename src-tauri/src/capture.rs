@@ -733,7 +733,9 @@ mod win {
                         break;
                     }
                     if let Some(codec) = transform.and_then(|t| t.cast::<ICodecAPI>().ok()) {
-                        apply_quality_codec_settings(&codec, bitrate, (fps * 2).max(16), "manual");
+                        let gop = (fps * 2).max(16);
+                        let failed = set_quality_codec_settings(&codec, bitrate, gop);
+                        log_encoder_quality(&codec, "manual", bitrate, gop, &failed);
                     }
                 }
             }
@@ -1972,6 +1974,14 @@ mod win {
         fps: u32,
         bitrate: u32,
     ) -> Result<()> {
+        // El modo de rate control (VBR) debe fijarse ANTES de SetOutputType; si se pone
+        // después, el encoder H.264 de MF lo ignora y se queda en CBR. GOP ~1 s (antes 0.5 s):
+        // menos IDRs caros = mejor calidad, sin perder mucha granularidad para alinear el
+        // guardado del replay al keyframe anterior.
+        let gop = fps.max(8);
+        let codec = encoder.cast::<ICodecAPI>().ok();
+        let quality_failed = codec.as_ref().map(|c| set_quality_codec_settings(c, bitrate, gop));
+
         let out_type = unsafe { MFCreateMediaType()? };
         unsafe {
             out_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
@@ -2000,12 +2010,8 @@ mod win {
             encoder.SetInputType(0, &in_type, 0)?;
         }
 
-        // GOP ~1 s (antes 0.5 s): menos IDRs caros = mejor calidad, sin perder mucha
-        // granularidad para alinear el guardado del replay al keyframe anterior. Best-effort
-        // vía ICodecAPI (rate control VBR + CABAC + B-frames=0); si el encoder no expone una
-        // propiedad se ignora y queda su default.
-        if let Ok(codec) = encoder.cast::<ICodecAPI>() {
-            apply_quality_codec_settings(&codec, bitrate, fps.max(8), "replay");
+        if let (Some(codec), Some(failed)) = (&codec, &quality_failed) {
+            log_encoder_quality(codec, "replay", bitrate, gop, failed);
         }
         Ok(())
     }
@@ -3388,15 +3394,15 @@ mod win {
         mean.saturating_mul(7) / 4
     }
 
-    // Política de calidad común a los dos caminos (manual y replay). Peak-Constrained VBR
-    // (modo 1) con media/pico, CABAC y B-frames=0. Todo best-effort: si un MFT no expone
-    // una propiedad se ignora y queda su default (CLAUDE.md §4.4). Registra qué ajustes
-    // rechazó el encoder y lee de vuelta el modo de rate control para confirmar (no suponer)
-    // que quedó en VBR. En el camino manual se llama sobre varios transforms: los que no son
-    // el encoder rechazan todo, así que no se registran (evita ruido).
-    fn apply_quality_codec_settings(codec: &ICodecAPI, mean_bitrate: u32, gop: u32, label: &str) {
+    // Fija la política de calidad: Peak-Constrained VBR (modo 1) con media/pico, CABAC y
+    // B-frames=0. Devuelve los ajustes que el encoder rechazó (vacío = todos aceptados).
+    // Todo best-effort (CLAUDE.md §4.4). IMPORTANTE: debe llamarse ANTES de SetOutputType;
+    // el encoder H.264 de MF ignora el modo de rate control si se fija después (se queda en
+    // CBR). B-frames=0 puede salir en la lista de rechazados sin consecuencia (ya es el
+    // default), por eso no cuenta para detectar "este transform no es el encoder".
+    fn set_quality_codec_settings(codec: &ICodecAPI, mean_bitrate: u32, gop: u32) -> Vec<&'static str> {
         unsafe {
-            let sets: [(&str, Result<()>); 6] = [
+            let sets: [(&'static str, Result<()>); 6] = [
                 ("RateControlMode", codec.SetValue(&CODECAPI_AVEncCommonRateControlMode, &variant_u32(1))),
                 ("MeanBitRate", codec.SetValue(&CODECAPI_AVEncCommonMeanBitRate, &variant_u32(mean_bitrate))),
                 ("MaxBitRate", codec.SetValue(&CODECAPI_AVEncCommonMaxBitRate, &variant_u32(peak_bitrate(mean_bitrate)))),
@@ -3404,20 +3410,25 @@ mod win {
                 ("GOPSize", codec.SetValue(&CODECAPI_AVEncMPVGOPSize, &variant_u32(gop))),
                 ("BPictureCount", codec.SetValue(&CODECAPI_AVEncMPVDefaultBPictureCount, &variant_u32(0))),
             ];
-            let failed: Vec<&str> = sets.iter().filter(|(_, r)| r.is_err()).map(|(n, _)| *n).collect();
-            // Este transform no es el encoder (p. ej. el conversor de color): no registrar.
-            if failed.len() == sets.len() {
-                return;
-            }
-            let mode = match codec.GetValue(&CODECAPI_AVEncCommonRateControlMode) {
-                Ok(got) => Some((*got.Anonymous.Anonymous).Anonymous.ulVal),
-                Err(_) => None,
-            };
-            if failed.is_empty() {
-                eprintln!("encoder[{label}]: calidad aplicada (VBR mean={mean_bitrate} pico={} gop={gop}); rate control leído={mode:?} (1=VBR)", peak_bitrate(mean_bitrate));
-            } else {
-                eprintln!("encoder[{label}]: ajustes rechazados {failed:?}; rate control leído={mode:?} (1=VBR)");
-            }
+            sets.iter().filter(|(_, r)| r.is_err()).map(|(n, _)| *n).collect()
+        }
+    }
+
+    // Lee de vuelta el modo de rate control (1=VBR) para confirmar —no suponer— que quedó, y
+    // registra el resultado. Si el encoder rechazó TODO menos B-frames, es que este transform
+    // no es el encoder (p. ej. el conversor de color del SinkWriter): no registra (evita ruido).
+    fn log_encoder_quality(codec: &ICodecAPI, label: &str, mean_bitrate: u32, gop: u32, failed: &[&str]) {
+        let real_failed: Vec<&&str> = failed.iter().filter(|n| **n != "BPictureCount").collect();
+        if real_failed.len() >= 5 {
+            return;
+        }
+        let mode = unsafe { codec.GetValue(&CODECAPI_AVEncCommonRateControlMode) }
+            .ok()
+            .map(|v| unsafe { (*v.Anonymous.Anonymous).Anonymous.ulVal });
+        if failed.is_empty() {
+            eprintln!("encoder[{label}]: calidad aplicada (VBR mean={mean_bitrate} pico={} gop={gop}); rate control leído={mode:?} (1=VBR)", peak_bitrate(mean_bitrate));
+        } else {
+            eprintln!("encoder[{label}]: ajustes rechazados {failed:?}; rate control leído={mode:?} (1=VBR)");
         }
     }
 
