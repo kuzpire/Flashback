@@ -85,7 +85,8 @@
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    padding: 6px 10px;
+    /* Mismo alto que el botón Exportar (.act.export): padding vertical 7px + logo 16px + borde 1px. */
+    padding: 7px 10px;
     font-size: 12px;
     color: var(--text-1);
     background: var(--bg-2);
