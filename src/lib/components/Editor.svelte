@@ -52,7 +52,10 @@
   // Canal cuyo fader se arrastra (para mostrar su burbuja de % mientras dura el gesto). Alto del
   // pulgar del fader: el cursor controla su centro, así que se descuenta del recorrido útil.
   let volActive = $state<'sys' | 'mic' | null>(null);
-  const VOL_THUMB = 20;
+  // Contador por canal: al mutear se incrementa para re-disparar la animación "pop" del icono
+  // (vía {#key} en el markup).
+  let muteTick = $state({ sys: 0, mic: 0 });
+  const VOL_THUMB = 16;
 
   // Burbuja de % flotante (position: fixed a nivel del overlay) para que el overflow de la timeline
   // no la recorte. Se posiciona sobre el pulgar del fader activo (al pasar el ratón o arrastrar).
@@ -105,10 +108,6 @@
   const navIdx = $derived(clipOrder.list.findIndex((c) => c.id === editorState.clip?.id));
   const hasPrev = $derived(navIdx > 0);
   const hasNext = $derived(navIdx >= 0 && navIdx < clipOrder.list.length - 1);
-  // Alto de la card del mezclador: fijo (el de micrófono + sistema) aunque solo haya sistema, para
-  // que no encoja. 53 = lane de vídeo (46 + gap 7); 107 = dos lanes de audio (50 + 50 + gap 7);
-  // +40 = 20px extra por arriba y 20 por abajo (la elevación sube otros 20 en el CSS).
-  const mixerH = 53 + 40 + 107;
 
   // La base de la timeline es estática: su ancho (a escala fija) representa la duración original
   // del clip. Cada sección se dibuja en su posición libre `posMs`; el espacio sin sección queda
@@ -521,23 +520,24 @@
 
   // ---- faders de volumen ----
   // Sitúa la burbuja (en coordenadas de viewport, para position: fixed) centrada sobre el pulgar.
+  // Fader horizontal: el pulgar recorre el eje X, la burbuja va encima de la barra.
   function placeBubble(rect: DOMRect, v: number) {
-    const thumbCenterY = rect.bottom - (v * (rect.height - VOL_THUMB) + VOL_THUMB / 2);
+    const thumbCenterX = rect.left + (v * (rect.width - VOL_THUMB) + VOL_THUMB / 2);
     bubble = {
-      x: rect.left + rect.width / 2,
-      y: thumbCenterY - VOL_THUMB / 2 - 6,
+      x: thumbCenterX,
+      y: rect.top - 6,
       pct: Math.round(v * 100),
     };
   }
 
-  function volAt(rect: DOMRect, clientY: number): number {
-    const usable = Math.max(1, rect.height - VOL_THUMB);
-    const fromBottom = rect.height - (clientY - rect.top);
-    return Math.max(0, Math.min(1, (fromBottom - VOL_THUMB / 2) / usable));
+  function volAt(rect: DOMRect, clientX: number): number {
+    const usable = Math.max(1, rect.width - VOL_THUMB);
+    const fromLeft = clientX - rect.left;
+    return Math.max(0, Math.min(1, (fromLeft - VOL_THUMB / 2) / usable));
   }
 
-  function setVol(chan: 'sys' | 'mic', clientY: number, rect: DOMRect) {
-    const v = volAt(rect, clientY);
+  function setVol(chan: 'sys' | 'mic', clientX: number, rect: DOMRect) {
+    const v = volAt(rect, clientX);
     if (chan === 'sys') editorState.mixer.sys_vol = v;
     else editorState.mixer.mic_vol = v;
     markEdited();
@@ -551,7 +551,7 @@
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
     drag = { kind: 'vol', chan, rect };
     volActive = chan;
-    setVol(chan, e.clientY, rect);
+    setVol(chan, e.clientX, rect);
   }
 
   // Al pasar el ratón sin arrastrar, muestra la burbuja en la posición actual del fader.
@@ -583,6 +583,7 @@
   function toggleMute(chan: 'sys' | 'mic') {
     if (chan === 'sys') editorState.mixer.sys_muted = !editorState.mixer.sys_muted;
     else editorState.mixer.mic_muted = !editorState.mixer.mic_muted;
+    muteTick[chan]++;
     markEdited();
   }
 
@@ -624,7 +625,7 @@
     if (drag.kind === 'seek') {
       seekOutput(outFromClientX(e.clientX));
     } else if (drag.kind === 'vol') {
-      setVol(drag.chan, e.clientY, drag.rect);
+      setVol(drag.chan, e.clientX, drag.rect);
     } else if (drag.kind === 'trim') {
       const r = laneEl?.getBoundingClientRect();
       if (!r) return;
@@ -1044,9 +1045,20 @@
       <div class="arow">
         {#snippet fader(chan: 'sys' | 'mic', vol: number, muted: boolean, label: string, icon: string)}
           <!-- svelte-ignore a11y_no_static_element_interactions -->
-          <div class="fader" class:muted style="--v: {vol};">
+          <div class="hfader" class:muted style="--v: {vol};">
+            <button
+              class="hfader-ico"
+              class:on={muted}
+              aria-label={muted ? t('ed.unmute', { label }) : t('ed.mute', { label })}
+              aria-pressed={muted}
+              onclick={() => toggleMute(chan)}
+            >
+              {#key muteTick[chan]}
+                <span class="ico-pop"><Icon name={icon} size={20} /></span>
+              {/key}
+            </button>
             <div
-              class="fader-rail"
+              class="hfader-rail"
               role="slider"
               tabindex="0"
               aria-label={label}
@@ -1059,26 +1071,19 @@
               onmousemove={(e) => onFaderHover(e, chan)}
               onmouseleave={onFaderLeave}
             >
-              <div class="fader-bar"><div class="fader-fill"></div></div>
-              <div class="fader-thumb"><span class="thumb-line"></span></div>
+              <div class="hfader-bar"><div class="hfader-fill"></div></div>
+              <div class="hfader-thumb"><span class="thumb-line"></span></div>
             </div>
-            <button
-              class="fader-ico"
-              class:on={muted}
-              aria-label={muted ? t('ed.unmute', { label }) : t('ed.mute', { label })}
-              aria-pressed={muted}
-              onclick={() => toggleMute(chan)}
-            ><Icon name={icon} size={22} /></button>
           </div>
         {/snippet}
 
-        <div class="mixer-card" style="height: {mixerH}px;">
+        <div class="mixer-card">
           <div class="faders">
             {#if !editorState.loading}
+              {@render fader('sys', editorState.mixer.sys_vol, editorState.mixer.sys_muted, editorState.system ? t('ed.sysAudio') : t('ed.audio'), editorState.system ? 'headphones' : 'speaker')}
               {#if editorState.mic}
                 {@render fader('mic', editorState.mixer.mic_vol, editorState.mixer.mic_muted, t('ed.micAudio'), 'mic')}
               {/if}
-              {@render fader('sys', editorState.mixer.sys_vol, editorState.mixer.sys_muted, editorState.system ? t('ed.sysAudio') : t('ed.audio'), editorState.system ? 'headphones' : 'speaker')}
             {/if}
           </div>
         </div>
@@ -1622,71 +1627,69 @@
     pointer-events: none;
   }
 
-  /* Card del mezclador: panel flotante en el gutter, alineado a su borde derecho (junto a las
-     ondas) y elevado (translateY -53) para que su borde superior cuadre con la lane de vídeo
-     (46 + gap 7). Dos faders verticales (mic / sistema) con icono-mute debajo. */
+  /* Card del mezclador: píldora flotante en el gutter, alineada con las lanes de audio. Dos filas
+     horizontales (sistema arriba, micrófono abajo), cada una a la altura de su onda (50px, gap 7).
+     La elevación = padding vertical, para que la 1ª fila cuadre con la lane de sistema sin hueco. */
   .arow { display: grid; grid-template-columns: var(--gutter) 1fr; align-items: start; }
   .mixer-card {
-    --lift: 73px;
+    --pad-v: 7px;
     position: sticky;
     left: 0;
     z-index: 25;
     justify-self: start;
     width: max-content;
-    display: flex;
     margin-left: 2px;
-    margin-right: 14px;
-    padding: 14px 18px 12px;
-    background: #0a0a0a;
-    border: 1px solid var(--line-strong);
-    border-radius: 18px;
-    box-shadow: 0 18px 42px -14px rgba(0, 0, 0, 0.7);
-    /* Sube la card para alinearla con la lane de vídeo; el margin-bottom negativo cancela el hueco
-       muerto que esa subida dejaría en el flujo, para que la sección inferior no crezca de más. */
-    transform: translateY(calc(-1 * var(--lift)));
-    margin-bottom: calc(-1 * var(--lift));
+    margin-right: 12px;
+    padding: var(--pad-v) 13px;
+    background: rgba(18, 18, 20, 0.72);
+    backdrop-filter: blur(14px);
+    border: 1px solid rgba(255, 255, 255, 0.09);
+    border-radius: 16px;
+    box-shadow: 0 16px 44px rgba(0, 0, 0, 0.5);
+    transform: translateY(calc(-1 * var(--pad-v)));
+    margin-bottom: calc(-1 * var(--pad-v));
   }
-  .faders { display: flex; gap: 20px; }
-  .fader { display: flex; flex-direction: column; align-items: center; gap: 10px; }
-  /* El cursor controla el centro del pulgar, por eso el relleno y el pulgar descuentan su alto
-     (--th) del recorrido. --v = volumen [0..1] (lo fija el componente por canal). */
-  .fader-rail {
-    --th: 20px;
+  .faders { display: flex; flex-direction: column; gap: 7px; }
+  .hfader { display: flex; align-items: center; gap: 8px; height: 50px; }
+  /* El cursor controla el centro del pulgar; relleno y pulgar descuentan su ancho (--th) del
+     recorrido. --v = volumen [0..1] (lo fija el componente por canal). */
+  .hfader-rail {
+    --th: 16px;
     position: relative;
-    flex: 1;
-    width: 34px;
+    width: 82px;
+    height: 34px;
     cursor: pointer;
     outline: none;
   }
-  .fader-rail:focus-visible { border-radius: 8px; box-shadow: 0 0 0 2px var(--accent-soft); }
-  .fader-bar {
+  .hfader-rail:focus-visible { border-radius: 8px; box-shadow: 0 0 0 2px var(--accent-soft); }
+  .hfader-bar {
     position: absolute;
-    left: 50%;
-    top: 0;
-    bottom: 0;
-    width: 10px;
-    transform: translateX(-50%);
-    border-radius: 999px;
-    overflow: hidden;
-    background: linear-gradient(180deg, #3a3a3d, #242427);
-  }
-  .fader-fill {
-    position: absolute;
+    top: 50%;
     left: 0;
     right: 0;
+    height: 8px;
+    transform: translateY(-50%);
+    border-radius: 999px;
+    overflow: hidden;
+    background: linear-gradient(90deg, #242427, #3a3a3d);
+  }
+  .hfader-fill {
+    position: absolute;
+    top: 0;
     bottom: 0;
-    height: calc(var(--v) * (100% - var(--th)) + var(--th) / 2);
+    left: 0;
+    width: calc(var(--v) * (100% - var(--th)) + var(--th) / 2);
     background: #f2f2f2;
   }
-  .fader-thumb {
+  .hfader-thumb {
     position: absolute;
-    left: 50%;
-    bottom: calc(var(--v) * (100% - var(--th)));
-    transform: translateX(-50%);
+    top: 50%;
+    left: calc(var(--v) * (100% - var(--th)));
+    transform: translateY(-50%);
     display: grid;
     place-items: center;
-    width: 16px;
-    height: var(--th);
+    width: var(--th);
+    height: 22px;
     border-radius: 5px;
     background: #fff;
     box-shadow: 0 2px 6px rgba(0, 0, 0, 0.55);
@@ -1709,18 +1712,27 @@
     pointer-events: none;
     z-index: 300;
   }
-  .fader-ico {
-    width: 36px;
-    height: 36px;
+  .hfader-ico {
+    flex-shrink: 0;
+    width: 32px;
+    height: 32px;
     display: grid;
     place-items: center;
     color: var(--text-0);
-    border-radius: 8px;
-    transition: color 0.12s ease, background 0.12s ease, opacity 0.16s ease;
+    border-radius: 9px;
+    transition: color 0.14s ease, background 0.14s ease;
   }
-  .fader-ico:hover { background: var(--bg-3); }
-  .fader-ico.on { color: var(--rec); }
-  .fader.muted .fader-rail { opacity: 0.4; }
+  .hfader-ico:hover { background: var(--bg-3); }
+  .hfader-ico.on { color: var(--rec); }
+  /* Animación al mutear: el icono se re-monta ({#key}) y hace un "pop". */
+  .ico-pop { display: grid; place-items: center; animation: mutePop 0.28s ease; }
+  @keyframes mutePop {
+    0% { transform: scale(1); }
+    35% { transform: scale(0.6); }
+    70% { transform: scale(1.15); }
+    100% { transform: scale(1); }
+  }
+  .hfader.muted .hfader-rail { opacity: 0.4; transition: opacity 0.16s ease; }
   .alanes { display: flex; flex-direction: column; gap: 7px; min-width: 0; }
 
   /* Popup de progreso de exportación: bloquea la interacción mientras recodifica. */
