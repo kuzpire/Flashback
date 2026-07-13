@@ -1352,7 +1352,18 @@
     min-height: 34px;
   }
   .tp-left { display: flex; align-items: center; justify-self: start; }
-  .tp-center { display: flex; align-items: center; gap: 4px; justify-self: center; }
+  /* Mismo aspecto de píldora flotante que la barra de fullscreen (.fs-controls). */
+  .tp-center {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    justify-self: center;
+    padding: 8px 12px;
+    background: rgba(18, 18, 20, 0.72);
+    backdrop-filter: blur(14px);
+    border: 1px solid rgba(255, 255, 255, 0.09);
+    border-radius: 16px;
+  }
   .tp-right { display: flex; align-items: center; gap: 6px; justify-self: end; }
 
   .tp-btn {
@@ -1372,7 +1383,18 @@
   .tp-play:hover { color: var(--text-0); background: var(--bg-3); }
   .tp-play:active { transform: scale(0.94); }
 
-  .tp-time { font-size: 12.5px; letter-spacing: 0.02em; white-space: nowrap; }
+  .tp-time {
+    font-size: 12.5px;
+    letter-spacing: 0.02em;
+    white-space: nowrap;
+    display: inline-flex;
+    align-items: center;
+    padding: 10px 15px;
+    background: rgba(18, 18, 20, 0.72);
+    backdrop-filter: blur(14px);
+    border: 1px solid rgba(255, 255, 255, 0.09);
+    border-radius: 16px;
+  }
   .tp-time .t-cur { color: var(--text-0); }
   .tp-time .t-sep { color: var(--text-3); margin: 0 4px; }
   .tp-time .t-dur { color: var(--text-3); }
@@ -1393,9 +1415,9 @@
   .act:hover { background: var(--bg-hover); color: var(--text-0); }
   .act:disabled { opacity: 0.4; pointer-events: none; }
   .act.export {
-    padding: 9px 22px;
-    gap: 8px;
-    font-size: 13px;
+    padding: 7px 15px;
+    gap: 7px;
+    font-size: 12px;
     color: var(--bg-0);
     background: var(--bright);
     border-color: transparent;
