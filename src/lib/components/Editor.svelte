@@ -1104,8 +1104,14 @@
       </div>
 
       <div class="tp-right">
-        <button class="act" disabled={editorState.segments.length <= 1} onclick={removeActive}>
-          <Icon name="trash" size={14} /> {t('ed.remove')}
+        <button
+          class="act remove"
+          disabled={editorState.segments.length <= 1}
+          onclick={removeActive}
+          aria-label={t('ed.remove')}
+          title={t('ed.remove')}
+        >
+          <Icon name="trash" size={16} />
         </button>
         <WatermarkToggle />
         <button class="act export" onclick={handleExport} disabled={editorState.exporting}>
@@ -1579,6 +1585,15 @@
   }
   .act:hover { background: var(--bg-hover); color: var(--text-0); }
   .act:disabled { opacity: 0.4; pointer-events: none; }
+  /* Remove: solo icono, del mismo alto que Exportar. Rojo cuando hay algo seleccionable para
+     borrar (habilitado); apagado (gris atenuado) cuando no hay nada que quitar. */
+  .act.remove { padding: 7px 10px; }
+  .act.remove:not(:disabled) { color: var(--rec); }
+  .act.remove:not(:disabled):hover {
+    color: var(--rec);
+    background: color-mix(in srgb, var(--rec) 16%, transparent);
+    border-color: transparent;
+  }
   .act.export {
     padding: 7px 15px;
     gap: 7px;
