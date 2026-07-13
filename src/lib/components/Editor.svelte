@@ -792,18 +792,15 @@
     try {
       const dst = await captureFrame(video.currentTime * 1000);
       if (!dst) return;
-      const name = dst.split(/[/\\]/).pop();
       // Copia automática al portapapeles leyendo el PNG ya guardado (sin canvas, que se "ensucia"
       // con el protocolo asset). Si falla, la captura igual queda guardada en disco.
-      let copied = false;
       try {
         const blob = await (await fetch(convertFileSrc(dst))).blob();
         await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
-        copied = true;
       } catch (err) {
         console.error('clipboard', err);
       }
-      showShotToast(dst, copied ? t('ed.shotCopied', { name: name ?? '' }) : t('ed.shotSaved', { name: name ?? '' }));
+      showShotToast(dst, t('ed.shotSaved'));
     } catch (e) {
       setNotice(t('ed.shotError', { e: String(e) }), 5000);
       console.error('capture', e);
@@ -1765,11 +1762,11 @@
     gap: 9px;
     padding: 9px 15px;
     font-size: 12.5px;
-    background: rgba(18, 18, 20, 0.94);
+    background: rgba(18, 18, 20, 0.72);
     backdrop-filter: blur(14px);
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    border-radius: 12px;
-    box-shadow: 0 14px 38px rgba(0, 0, 0, 0.5);
+    border: 1px solid rgba(255, 255, 255, 0.09);
+    border-radius: 16px;
+    box-shadow: 0 16px 44px rgba(0, 0, 0, 0.55);
     z-index: 10001;
   }
   .shot-toast.fs { bottom: 124px; }
