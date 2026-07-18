@@ -6,6 +6,7 @@
   import Icon from '$lib/components/Icon.svelte';
   import WindowControls from '$lib/components/WindowControls.svelte';
   import { invoke } from '@tauri-apps/api/core';
+  import { listen } from '@tauri-apps/api/event';
   import { register, unregisterAll } from '@tauri-apps/plugin-global-shortcut';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import { hotkeys, capture, labelFor, labelTokens } from '$lib/hotkeys.svelte';
@@ -420,7 +421,8 @@
     const micDevice = micInput;
     // En modo Aplicación el objetivo es siempre 'window', pero debe re-armarse al cambiar de juego:
     // se mete la identidad del juego en la key para que cambiar de juego reconstruya la captura
-    // contra la nueva ventana (si no, seguiría capturando el juego anterior/minimizado).
+    // contra la nueva ventana (si no, seguiría capturando el juego anterior/minimizado). El relevo
+    // launcher → juego con el mismo nombre lo resuelve el backend re-apuntando la captura solo.
     const targetKey = target === 'window' ? `window:${game}` : target;
     const key = enabled && target ? `${targetKey}|${seconds}|${fps}|${quality}|${resolution}|${bitrate}|${mic}|${micDevice}` : 'off';
     if (key === lastReplayKey) return;
@@ -440,6 +442,18 @@
         console.error('replay', e);
       }
     })();
+  });
+
+  // El backend re-apunta la captura solo (modo Aplicación) cuando la ventana del juego cambia
+  // (relevo launcher → juego, recreación al alternar fullscreen). Al reconstruirse contra la
+  // nueva ventana emite este evento y volvemos a mostrar el toast "Listo para clipear".
+  $effect(() => {
+    const un = listen('replay-retargeted', () => {
+      toast(t('toast.replayReadyHint'), 'ready', labelTokens(hotkeys.saveReplay));
+    });
+    return () => {
+      un.then((u) => u());
+    };
   });
 
   // Chequeo de actualización ~4s tras montar. El popup solo se auto-muestra si la ventana

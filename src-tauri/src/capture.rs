@@ -1143,6 +1143,10 @@ mod win {
         mic: bool,
         mic_device: String,
         encoder_pref: String,
+        // Se invoca cuando la captura se re-arma contra otra ventana del juego (modo Aplicación),
+        // para que la UI vuelva a mostrar el toast "Listo para clipear". Desacopla capture.rs de
+        // Tauri: lib.rs pasa un cierre que emite el evento.
+        on_retarget: Box<dyn Fn() + Send>,
     ) -> std::result::Result<(), String> {
         let mut guard = REPLAY_STATE.lock().unwrap();
         if guard.is_some() {
@@ -1164,7 +1168,7 @@ mod win {
             .spawn(move || {
                 replay_thread(
                     target, seconds, fps, factor, resolution, bitrate, mic, mic_device,
-                    encoder_pref, stop_t, buf_t, stats, ready_tx,
+                    encoder_pref, stop_t, buf_t, stats, ready_tx, on_retarget,
                 )
             })
             .map_err(|e| e.to_string())?;
@@ -1323,6 +1327,7 @@ mod win {
         buffer: Arc<Mutex<ReplayBuffer>>,
         stats: Arc<Stats>,
         ready: mpsc::Sender<std::result::Result<(), String>>,
+        on_retarget: Box<dyn Fn() + Send>,
     ) {
         unsafe {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
@@ -1339,6 +1344,9 @@ mod win {
         // se pidió parar, se reintenta (reconexión). En modo monitor un fallo es definitivo.
         let window_mode = target == "window";
         let mut announced = false;
+        // El pump anterior salió por retarget: la próxima reconstrucción exitosa apunta a otra
+        // ventana del juego, así que al lograrla se avisa a la UI (toast "Listo para clipear").
+        let mut retargeting = false;
         loop {
             if stop.load(Ordering::SeqCst) {
                 break;
@@ -1355,9 +1363,12 @@ mod win {
                     if !announced {
                         let _ = ready.send(Ok(()));
                         announced = true;
+                    } else if retargeting {
+                        on_retarget();
                     }
                     run_pump(&pipe, &stop, &buffer, window_mode);
                     let lost = pipe.device_lost.load(Ordering::SeqCst);
+                    let retargeted = pipe.retarget.load(Ordering::SeqCst);
                     teardown_replay(pipe);
                     if stop.load(Ordering::SeqCst) {
                         break;
@@ -1369,6 +1380,7 @@ mod win {
                     if !window_mode && !lost {
                         break;
                     }
+                    retargeting = retargeted;
                 }
                 Err(e) => {
                     // Fallo al (re)construir. Si aún no habíamos arrancado es un fallo inicial: en
@@ -1460,6 +1472,12 @@ mod win {
         // Lo marca el worker del encoder cuando el device D3D se pierde (TDR/reset de GPU): el
         // bombeo sale y el hilo de replay reconstruye el pipeline con un device nuevo (§4.4).
         device_lost: Arc<AtomicBool>,
+        // Lo marca FocusState (modo ventana) cuando la ventana rastreada dejó de ser capturable
+        // pero el juego tiene ahora OTRA ventana visible distinta: el bombeo sale y el bucle de
+        // replay reconstruye la captura contra la nueva ventana (relevo launcher → juego, o
+        // recreación de la ventana al alternar fullscreen), en vez de quedarse mostrando el
+        // cartel sobre una ventana muerta o capturando la equivocada.
+        retarget: Arc<AtomicBool>,
     }
     unsafe impl Send for ReplayPipeline {}
     // Se comparte por referencia entre el hilo de pacing y el worker del encoder (thread::scope
@@ -1786,6 +1804,7 @@ mod win {
             game_hwnd,
             size_changed,
             device_lost: Arc::new(AtomicBool::new(false)),
+            retarget: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -2258,6 +2277,7 @@ mod win {
             while !stop.load(Ordering::SeqCst)
             && !pipe.size_changed.load(Ordering::Relaxed)
             && !pipe.device_lost.load(Ordering::Relaxed)
+            && !pipe.retarget.load(Ordering::Relaxed)
         {
                 foc.poll(window_mode, pipe);
 
@@ -2498,6 +2518,7 @@ mod win {
         while !stop.load(Ordering::SeqCst)
             && !pipe.size_changed.load(Ordering::Relaxed)
             && !pipe.device_lost.load(Ordering::Relaxed)
+            && !pipe.retarget.load(Ordering::Relaxed)
         {
             foc.poll(window_mode, pipe);
 
@@ -2663,7 +2684,35 @@ mod win {
                 return;
             }
             self.last_min_check = std::time::Instant::now();
+
+            // Re-target principal (barato, sin EnumWindows): si el proceso de la ventana que
+            // capturamos ya no es el juego en primer plano rastreado, rearmamos contra la ventana
+            // correcta. Cubre el launcher dejado abierto: el replay se armó sobre él y, al abrir el
+            // juego encima (aunque el launcher siga VISIBLE detrás, en fullscreen), el foreground
+            // pasa al juego, que es otro PID. Tras un rearme la ventana capturada pertenece a ese
+            // PID, así que en juego normal esto coincide y no dispara nada.
+            if let Some(want) = crate::detect::current_game_pid() {
+                if window_pid(pipe.game_hwnd) != Some(want) {
+                    pipe.retarget.store(true, Ordering::Relaxed);
+                    return;
+                }
+            }
+
             let now_min = window_minimized(pipe.game_hwnd);
+
+            // Fallback para swaps de ventana con el MISMO PID (recreación al alternar fullscreen):
+            // la ventana rastreada dejó de ser capturable pero el juego tiene otra ventana visible
+            // distinta. resolve_game_window() salta ventanas minimizadas, así que un alt-tab real
+            // (única ventana del juego, minimizada) devuelve None y conserva el cartel.
+            if now_min {
+                if let Some(hwnd) = resolve_game_window() {
+                    if hwnd.0 as isize != pipe.game_hwnd {
+                        pipe.retarget.store(true, Ordering::Relaxed);
+                        return;
+                    }
+                }
+            }
+
             if now_min && !self.minimized {
                 // Transición a minimizado: componer el cartel del último frame real.
                 self.card_ready = false;
@@ -2710,6 +2759,18 @@ mod win {
         }
         let hwnd = HWND(hwnd_raw as *mut core::ffi::c_void);
         unsafe { IsIconic(hwnd).as_bool() || !IsWindowVisible(hwnd).as_bool() }
+    }
+
+    // PID dueño de una ventana (0 = sin ventana o HWND ya destruida). Consulta O(1) por HWND, sin
+    // recorrer ventanas; la usa FocusState para comparar el proceso capturado con el juego rastreado.
+    fn window_pid(hwnd_raw: isize) -> Option<u32> {
+        if hwnd_raw == 0 {
+            return None;
+        }
+        let hwnd = HWND(hwnd_raw as *mut core::ffi::c_void);
+        let mut pid = 0u32;
+        unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+        (pid != 0).then_some(pid)
     }
 
     // Pide al encoder que el siguiente frame de salida sea un IDR (best-effort vía ICodecAPI).

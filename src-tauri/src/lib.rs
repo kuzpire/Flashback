@@ -165,6 +165,11 @@ fn start_replay(
 ) -> Result<(), String> {
     let dir = config::clips_dir(&app).to_string_lossy().into_owned();
     let encoder_pref = config::get_encoder(&app);
+    let app_ev = app.clone();
+    let on_retarget = Box::new(move || {
+        use tauri::Emitter;
+        let _ = app_ev.emit("replay-retargeted", ());
+    });
     capture::start_replay(
         target,
         dir,
@@ -176,6 +181,7 @@ fn start_replay(
         mic,
         mic_device,
         encoder_pref,
+        on_retarget,
     )
 }
 
