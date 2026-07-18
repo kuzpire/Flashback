@@ -40,12 +40,13 @@ mod win {
     use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
 
     const LOGO_PNG: &[u8] = include_bytes!("../icons/128x128@2x.png");
-    const TEXT: &str = "The game is out of focus";
 
     pub struct OutOfFocusCard {
         ctx: ID2D1DeviceContext,
         logo: ID2D1Bitmap1,
         text_format: IDWriteTextFormat,
+        // Texto del cartel ya en UTF-16 (lo elige el llamador según el idioma).
+        text: Vec<u16>,
         white: ID2D1SolidColorBrush,
         dim: ID2D1SolidColorBrush,
         blur: ID2D1Effect,
@@ -55,7 +56,7 @@ mod win {
     unsafe impl Send for OutOfFocusCard {}
 
     impl OutOfFocusCard {
-        pub fn new(device: &ID3D11Device, width: u32, height: u32) -> Result<Self> {
+        pub fn new(device: &ID3D11Device, width: u32, height: u32, text: &str) -> Result<Self> {
             let dxgi: IDXGIDevice = device.cast()?;
             let d2d_device = unsafe { D2D1CreateDevice(&dxgi, None)? };
             let ctx = unsafe { d2d_device.CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)? };
@@ -119,6 +120,7 @@ mod win {
                 ctx,
                 logo,
                 text_format,
+                text: text.encode_utf16().collect(),
                 white,
                 dim,
                 blur,
@@ -184,8 +186,6 @@ mod win {
                 right: w,
                 bottom: h,
             };
-            let text: Vec<u16> = TEXT.encode_utf16().collect();
-
             unsafe {
                 self.ctx.SetTarget(&target);
                 self.blur.SetInput(0, &src_bmp, true);
@@ -208,7 +208,7 @@ mod win {
                     None,
                 );
                 self.ctx.DrawText(
-                    &text,
+                    &self.text,
                     &self.text_format,
                     &text_rect,
                     &self.white,

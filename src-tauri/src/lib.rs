@@ -170,6 +170,11 @@ fn start_replay(
         use tauri::Emitter;
         let _ = app_ev.emit("replay-retargeted", ());
     });
+    let card_text = match config::get_language(&app).as_str() {
+        "es" => "Aquí estaremos cuando vuelvas",
+        _ => "We'll be here when you're back",
+    }
+    .to_string();
     capture::start_replay(
         target,
         dir,
@@ -182,6 +187,7 @@ fn start_replay(
         mic_device,
         encoder_pref,
         on_retarget,
+        card_text,
     )
 }
 

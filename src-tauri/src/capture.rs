@@ -1147,6 +1147,9 @@ mod win {
         // para que la UI vuelva a mostrar el toast "Listo para clipear". Desacopla capture.rs de
         // Tauri: lib.rs pasa un cierre que emite el evento.
         on_retarget: Box<dyn Fn() + Send>,
+        // Texto del cartel "fuera de foco", ya localizado por el llamador (capture.rs no conoce
+        // el idioma).
+        card_text: String,
     ) -> std::result::Result<(), String> {
         let mut guard = REPLAY_STATE.lock().unwrap();
         if guard.is_some() {
@@ -1168,7 +1171,7 @@ mod win {
             .spawn(move || {
                 replay_thread(
                     target, seconds, fps, factor, resolution, bitrate, mic, mic_device,
-                    encoder_pref, stop_t, buf_t, stats, ready_tx, on_retarget,
+                    encoder_pref, stop_t, buf_t, stats, ready_tx, on_retarget, card_text,
                 )
             })
             .map_err(|e| e.to_string())?;
@@ -1328,6 +1331,7 @@ mod win {
         stats: Arc<Stats>,
         ready: mpsc::Sender<std::result::Result<(), String>>,
         on_retarget: Box<dyn Fn() + Send>,
+        card_text: String,
     ) {
         unsafe {
             let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
@@ -1354,7 +1358,7 @@ mod win {
             let built = resolve_target_item(&target).and_then(|item| {
                 build_replay(
                     &buffer, &stats, item, fps, factor, resolution, bitrate_override, mic,
-                    mic_device.clone(), &encoder_pref, window_mode,
+                    mic_device.clone(), &encoder_pref, window_mode, &card_text,
                 )
                 .map_err(|e| format!("{e:?}"))
             });
@@ -1512,6 +1516,7 @@ mod win {
         mic_device: String,
         encoder_pref: &str,
         window_mode: bool,
+        card_text: &str,
     ) -> Result<ReplayPipeline> {
         ensure_mf();
         let (device, d3d_device) = create_device()?;
@@ -1756,7 +1761,7 @@ mod win {
         // Cartel "fuera de foco": solo en modo ventana. Si Direct2D falla por lo que sea, se
         // sigue sin cartel (se volverá a la pausa: no se codifica nada mientras minimizado).
         let card = if window_mode {
-            match crate::overlay::OutOfFocusCard::new(&device, width, height) {
+            match crate::overlay::OutOfFocusCard::new(&device, width, height, card_text) {
                 Ok(overlay) => {
                     let tex = create_bgra_textures(&device, width, height, 1)?
                         .into_iter()
