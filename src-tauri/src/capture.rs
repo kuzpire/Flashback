@@ -508,7 +508,7 @@ mod win {
         let stats = stats.clone();
         let enc = encoder.clone();
         let interval = fps_interval(fps);
-        let last_kept = Arc::new(AtomicI64::new(i64::MIN));
+        let selector = Arc::new(SlotSelector::new());
         let handler = TypedEventHandler::<Direct3D11CaptureFramePool, IInspectable>::new(
             move |pool, _| {
                 ensure_handler_priority();
@@ -519,7 +519,7 @@ mod win {
                             stats.height.store(s.Height.max(0) as u32, Ordering::Relaxed);
                         }
                         let t = frame.SystemRelativeTime().map(|x| x.Duration).unwrap_or(0);
-                        if keep_frame(&last_kept, t, interval) {
+                        if selector.keep(t, interval) {
                             if let Ok(surface) = frame.Surface() {
                                 if let Ok(access) = surface.cast::<IDirect3DDxgiInterfaceAccess>() {
                                     if let Ok(tex) =
@@ -1657,13 +1657,13 @@ mod win {
         // Límite de FPS: descartar frames antes de la copia GPU y del canal para no
         // codificar de más (clave para los perfiles ligeros tipo 480p/20 FPS).
         let interval = fps_interval(fps);
-        let last_kept = Arc::new(AtomicI64::new(i64::MIN));
         // El frame pool se crea a un tamaño fijo (width/height). Si la ventana crece (p. ej. un
         // juego que pasa a fullscreen/borderless tras armarse el replay), WGC recorta a la
         // esquina superior izquierda de ese tamaño viejo. Al detectar el cambio se marca y el
         // bombeo sale para que el hilo reconstruya el pipeline al nuevo tamaño. Un monitor no
         // cambia de tamaño, así que esto solo afecta a la captura por ventana.
         let size_changed = Arc::new(AtomicBool::new(false));
+        let selector = Arc::new(SlotSelector::new());
         let stats = stats.clone();
         let feed_h = feed.clone();
         let size_changed_h = size_changed.clone();
@@ -1682,7 +1682,7 @@ mod win {
                             }
                         }
                         let t = frame.SystemRelativeTime().map(|x| x.Duration).unwrap_or(0);
-                        if keep_frame(&last_kept, t, interval) {
+                        if selector.keep(t, interval) {
                             if let Ok(surface) = frame.Surface() {
                                 if let Ok(access) = surface.cast::<IDirect3DDxgiInterfaceAccess>() {
                                     if let Ok(tex) =
@@ -3469,34 +3469,46 @@ mod win {
         });
     }
 
-    // Decide si conservar un frame con timestamp `t`. `next` guarda el próximo instante
-    // objetivo (i64::MIN = aún ninguno) y avanza por `interval` EXACTO, sin reanclarse al `t`
-    // real: así el recuento se mantiene en los FPS pedidos aunque el refresco del monitor no
-    // sea múltiplo del objetivo (p. ej. 60 FPS desde 144 Hz, donde reanclar perdía frames y
-    // daba ~48-50 FPS).
-    fn keep_frame(next: &AtomicI64, t: i64, interval: i64) -> bool {
-        if interval <= 0 {
-            return true;
+    // Selección CFR: conserva UN frame por slot sobre la MISMA rejilla `time_slot` que emite el
+    // pump. La reja anterior avanzaba por su cuenta (umbral con holgura), desfasada de la del pump:
+    // ese doble cuantizado conservaba frames casi contiguos (pares casi-duplicados, incluidos los
+    // bursts sub-ms que WGC entrega al presentar dos veces) y saltaba huecos. Eso era el batido que
+    // se veía al grabar 60 desde juegos a tasa no múltiplo (p. ej. 110 fps). Al quedarnos con el
+    // primer frame de cada slot nuevo, no puede haber dos frames en el mismo slot y el espaciado
+    // queda ~uniforme (verificado contra SteelSeries Moments). Un hueco real (juego congelado) hace
+    // que el slot salte; el pump lo absorbe con su guarda de reloj de pared (STALL_SLOTS).
+    struct SlotSelector {
+        base: AtomicI64,
+        // Último slot conservado. i64::MIN = aún sin base (ningún frame visto).
+        last_slot: AtomicI64,
+    }
+
+    impl SlotSelector {
+        fn new() -> SlotSelector {
+            SlotSelector {
+                base: AtomicI64::new(0),
+                last_slot: AtomicI64::new(i64::MIN),
+            }
         }
-        let prev = next.load(Ordering::Relaxed);
-        if prev == i64::MIN {
-            next.store(t + interval, Ordering::Relaxed);
-            return true;
-        }
-        // Holgura para absorber el jitter del compositor sin descartar un frame válido.
-        if t >= prev - interval / 8 {
-            // El objetivo avanza por un intervalo EXACTO. Solo se realinea ante un hueco grande
-            // (juego congelado/minimizado, ~8+ frames), no por el jitter de entrega de WGC:
-            // realinear por jitter saltaba deadlines y bajaba el recuento (54 en vez de 60).
-            let nd = if t - prev > 8 * interval {
-                t + interval
+
+        // true si `t` (SystemRelativeTime del frame) abre un slot nuevo. WGC serializa el callback,
+        // así que no hay carrera real; los atómicos solo aportan la mutabilidad interior que exige Fn.
+        fn keep(&self, t: i64, interval: i64) -> bool {
+            if interval <= 0 {
+                return true;
+            }
+            if self.last_slot.load(Ordering::Relaxed) == i64::MIN {
+                self.base.store(t, Ordering::Relaxed);
+                self.last_slot.store(0, Ordering::Relaxed);
+                return true;
+            }
+            let slot = time_slot(t, self.base.load(Ordering::Relaxed), interval);
+            if slot > self.last_slot.load(Ordering::Relaxed) {
+                self.last_slot.store(slot, Ordering::Relaxed);
+                true
             } else {
-                prev + interval
-            };
-            next.store(nd, Ordering::Relaxed);
-            true
-        } else {
-            false
+                false
+            }
         }
     }
 
@@ -3803,7 +3815,6 @@ mod win {
     #[cfg(test)]
     mod tests {
         use super::*;
-        use std::sync::atomic::{AtomicI64, Ordering};
 
         #[test]
         fn clamp_fps_bounds() {
@@ -3888,27 +3899,66 @@ mod win {
         }
 
         #[test]
-        fn keep_frame_limits_rate() {
-            let next = AtomicI64::new(i64::MIN);
+        fn selector_keeps_one_frame_per_slot() {
+            let sel = SlotSelector::new();
             let interval = 100;
-            // Primer frame: siempre se guarda.
-            assert!(keep_frame(&next, 1000, interval));
-            // Demasiado pronto (dentro del intervalo): se descarta.
-            assert!(!keep_frame(&next, 1050, interval));
-            // En el slot objetivo: se guarda.
-            assert!(keep_frame(&next, 1100, interval));
+            // Primer frame: abre el slot 0.
+            assert!(sel.keep(1000, interval));
+            // Dentro del mismo slot: se descarta (no dos frames en un slot).
+            assert!(!sel.keep(1040, interval));
+            // Slot 1 (centro 1100, redondeo al más cercano): se guarda.
+            assert!(sel.keep(1100, interval));
+            // Otro dentro del slot 1: se descarta.
+            assert!(!sel.keep(1130, interval));
             // interval<=0 => sin límite.
-            assert!(keep_frame(&next, 0, 0));
+            assert!(sel.keep(0, 0));
         }
 
+        // Núcleo del arreglo del judder: dos frames casi contiguos (burst sub-slot que WGC entrega
+        // al presentar dos veces) caen en el mismo slot => solo se conserva UNO. La reja anterior,
+        // desfasada de la del pump, podía conservar ambos (par casi-duplicado = batido).
         #[test]
-        fn keep_frame_realigns_after_big_gap() {
-            let next = AtomicI64::new(i64::MIN);
+        fn selector_collapses_subslot_burst() {
+            let sel = SlotSelector::new();
+            let interval = 166_666; // 60 fps
+            assert!(sel.keep(0, interval)); // slot 0
+            assert!(!sel.keep(1_000, interval)); // +0.1 ms: mismo slot
+            assert!(!sel.keep(2_000, interval)); // +0.2 ms: mismo slot
+            assert!(sel.keep(interval, interval)); // slot 1
+        }
+
+        // Un juego a 110 fps muestreado a 60: ningún par de frames conservados cae en el mismo slot
+        // (sin agrupamiento) y el recuento queda en ~60. Es el caso que se veía a tirones.
+        #[test]
+        fn selector_no_clustering_at_110fps() {
+            let sel = SlotSelector::new();
+            let interval = fps_interval(60);
+            let src_period = 10_000_000f64 / 110.0;
+            let mut base = None;
+            let mut last_slot = i64::MIN;
+            let mut kept = 0;
+            for k in 0..110i64 {
+                let t = (k as f64 * src_period) as i64;
+                if sel.keep(t, interval) {
+                    kept += 1;
+                    let slot = time_slot(t, *base.get_or_insert(t), interval);
+                    // Estrictamente creciente: nunca dos frames en el mismo slot.
+                    assert!(slot > last_slot, "slot {slot} no supera a {last_slot}");
+                    last_slot = slot;
+                }
+            }
+            assert!((59..=61).contains(&kept), "kept={kept} fuera de ~60");
+        }
+
+        // Hueco real (juego congelado/minimizado): al reanudar, el slot salta y se conserva el
+        // frame; el pump absorbe el salto con su guarda STALL. No hay spam ni recuento inflado.
+        #[test]
+        fn selector_jumps_after_freeze() {
+            let sel = SlotSelector::new();
             let interval = 100;
-            assert!(keep_frame(&next, 0, interval));
-            // Hueco grande (>8 intervalos: juego minimizado/congelado): reancla al tiempo real.
-            assert!(keep_frame(&next, 2000, interval));
-            assert_eq!(next.load(Ordering::Relaxed), 2100);
+            assert!(sel.keep(0, interval)); // slot 0
+            assert!(sel.keep(2_000, interval)); // hueco de 20 slots: se conserva el primero tras el hueco
+            assert!(!sel.keep(2_030, interval)); // mismo slot que el anterior: se descarta
         }
 
         // El guardado ancla el clip al IDR anterior al inicio de la ventana (hasta ~1 GOP atrás).
