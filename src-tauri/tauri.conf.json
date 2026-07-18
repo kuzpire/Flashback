@@ -14,10 +14,10 @@
     "windows": [
       {
         "title": "Flashback",
-        "width": 1200,
-        "height": 675,
-        "minWidth": 1200,
-        "minHeight": 675,
+        "width": 1366,
+        "height": 768,
+        "minWidth": 1366,
+        "minHeight": 768,
         "decorations": false,
         "shadow": true,
         "visible": false

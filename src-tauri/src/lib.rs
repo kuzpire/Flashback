@@ -438,8 +438,8 @@ pub fn run() {
             // para no parpadear) y aquí se muestra.
             let autostart = std::env::args().any(|a| a == "--autostart");
             if let Some(w) = app.get_webview_window("main") {
-                let _ = w.set_min_size(Some(tauri::LogicalSize { width: 1200.0, height: 675.0 }));
-                let _ = w.set_size(tauri::LogicalSize { width: 1200.0, height: 675.0 });
+                let _ = w.set_min_size(Some(tauri::LogicalSize { width: 1366.0, height: 768.0 }));
+                let _ = w.set_size(tauri::LogicalSize { width: 1366.0, height: 768.0 });
                 if !autostart {
                     let _ = w.show();
                 }
