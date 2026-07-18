@@ -24,6 +24,7 @@
   import { revealItemInDir, openPath } from '@tauri-apps/plugin-opener';
   import { convertFileSrc } from '@tauri-apps/api/core';
   import { getCurrentWindow } from '@tauri-apps/api/window';
+  import { fade } from 'svelte/transition';
 
   let video = $state<HTMLVideoElement | null>(null);
   let sysAudio = $state<HTMLAudioElement | null>(null);
@@ -61,7 +62,7 @@
   // Contador por canal: al mutear se incrementa para re-disparar la animación "pop" del icono
   // (vía {#key} en el markup).
   let muteTick = $state({ sys: 0, mic: 0 });
-  const VOL_THUMB = 16;
+  const VOL_THUMB = 22;
 
   // Burbuja de % flotante (position: fixed a nivel del overlay) para que el overflow de la timeline
   // no la recorte. Se posiciona sobre el pulgar del fader activo (al pasar el ratón o arrastrar).
@@ -100,12 +101,12 @@
   let micCanvas = $state<HTMLCanvasElement | null>(null);
   let mixCanvas = $state<HTMLCanvasElement | null>(null);
 
-  const SYS_HUE = '#6f93f9';
-  const SYS_DIM = 'rgba(111, 147, 249, 0.16)';
-  const MIC_HUE = '#f4c95d';
-  const MIC_DIM = 'rgba(244, 201, 93, 0.16)';
-  const MIX_HUE = '#8b93a7';
-  const MIX_DIM = 'rgba(139, 147, 167, 0.16)';
+  const SYS_HUE = '#f2f2f2';
+  const SYS_DIM = 'rgba(242, 242, 242, 0.16)';
+  const MIC_HUE = '#f2f2f2';
+  const MIC_DIM = 'rgba(242, 242, 242, 0.16)';
+  const MIX_HUE = '#f2f2f2';
+  const MIX_DIM = 'rgba(242, 242, 242, 0.16)';
 
   const FRAME_MS = $derived(1000 / (editorState.fps || 30));
   const hasSeparate = $derived(!!(editorState.system || editorState.mic));
@@ -143,6 +144,15 @@
       width: ((seg.endMs - seg.startMs) / total) * z * 100,
     }));
   });
+
+  // Estado de la onda de la pista principal (system o mix): listo cuando ya tiene peaks. Skeleton
+  // mientras no lo esté; "sin audio" solo cuando terminó de cargar y de verdad no hay pista mix.
+  const primaryPeaksReady = $derived(
+    editorState.system ? !!editorState.sysPeaks : !!editorState.mixPeaks
+  );
+  const primaryNoAudio = $derived(
+    !editorState.loading && !editorState.system && !editorState.mixPeaks
+  );
 
   const two = (n: number) => String(Math.floor(n)).padStart(2, '0');
   function fmtTime(sec: number): string {
@@ -936,6 +946,18 @@
       }
       ctx.fill();
     };
+    // Capa base: el waveform original completo (mapeo recto posición→tiempo) en gris tenue. Las
+    // zonas sin sección (huecos al recortar/mover un bloque) no quedan vacías: muestran la onda en
+    // gris, "presente pero fuera de sección". Las secciones se pintan encima en su color y la tapan.
+    const totalX = z * w;
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.12)';
+    ctx.beginPath();
+    for (let x = 0; x < totalX; x++) {
+      const b = Math.min(peaks.length - 1, Math.max(0, Math.floor((x / totalX) * peaks.length)));
+      const y = Math.max(0.5, Math.min(1, peaks[b] * 1.8) * amp);
+      ctx.rect(x, mid - y, 1, y * 2);
+    }
+    ctx.fill();
     // Los bloques desactivados se pintan siempre atenuados (color dim), como en la timeline.
     paint(editorState.segments.filter((s) => !s.disabled), muted ? dim : hue);
     paint(editorState.segments.filter((s) => s.disabled), dim);
@@ -1142,7 +1164,6 @@
             onmousedown={(e) => onBlockDown(e, s.index)}
             oncontextmenu={(e) => onBlockContext(e, s.index)}
           >
-            <span class="block-n mono">{s.index + 1}</span>
             {#if s.index === editorState.activeSegment}
               <!-- svelte-ignore a11y_no_static_element_interactions -->
               <span class="grip start" onmousedown={(e) => onGripDown(e, s.index, 'start')}></span>
@@ -1157,68 +1178,87 @@
 
       <div class="arow">
         {#snippet fader(chan: 'sys' | 'mic', vol: number, muted: boolean, label: string, icon: string)}
-          <!-- svelte-ignore a11y_no_static_element_interactions -->
-          <div class="hfader" class:muted style="--v: {vol};">
+          <div class="audio-card" class:muted style="--v: {vol};">
             <button
-              class="hfader-ico"
+              class="ac-ico"
               class:on={muted}
               aria-label={muted ? t('ed.unmute', { label }) : t('ed.mute', { label })}
               aria-pressed={muted}
               onclick={() => toggleMute(chan)}
             >
               {#key muteTick[chan]}
-                <span class="ico-pop"><Icon name={icon} size={20} /></span>
+                <span class="ico-pop"><Icon name={icon} size={18} /></span>
               {/key}
             </button>
-            <div
-              class="hfader-rail"
-              role="slider"
-              tabindex="0"
-              aria-label={label}
-              aria-valuemin="0"
-              aria-valuemax="100"
-              aria-valuenow={Math.round(vol * 100)}
-              onmousedown={(e) => onFaderDown(e, chan)}
-              onkeydown={(e) => onFaderKey(e, chan)}
-              onmouseenter={(e) => onFaderHover(e, chan)}
-              onmousemove={(e) => onFaderHover(e, chan)}
-              onmouseleave={onFaderLeave}
-            >
-              <div class="hfader-bar"><div class="hfader-fill"></div></div>
-              <div class="hfader-thumb"><span class="thumb-line"></span></div>
+            <div class="ac-body">
+              <span class="ac-label">{label}</span>
+              <!-- svelte-ignore a11y_no_static_element_interactions -->
+              <div
+                class="hfader-rail"
+                role="slider"
+                tabindex="0"
+                aria-label={label}
+                aria-valuemin="0"
+                aria-valuemax="100"
+                aria-valuenow={Math.round(vol * 100)}
+                onmousedown={(e) => onFaderDown(e, chan)}
+                onkeydown={(e) => onFaderKey(e, chan)}
+                onmouseenter={(e) => onFaderHover(e, chan)}
+                onmousemove={(e) => onFaderHover(e, chan)}
+                onmouseleave={onFaderLeave}
+              >
+                <div class="hfader-bar"><div class="hfader-fill"></div></div>
+                <div class="hfader-thumb"><span class="thumb-line"></span></div>
+              </div>
             </div>
           </div>
         {/snippet}
 
-        <div class="mixer-card">
-          <div class="faders">
-            {#if !editorState.loading}
-              {@render fader('sys', editorState.mixer.sys_vol, editorState.mixer.sys_muted, editorState.system ? t('ed.sysAudio') : t('ed.audio'), editorState.system ? 'headphones' : 'speaker')}
-              {#if editorState.mic}
+        {#snippet faderSkeleton()}
+          <div class="audio-card sk">
+            <div class="sk-ico"></div>
+            <div class="ac-body">
+              <div class="sk-label"></div>
+              <div class="sk-rail"></div>
+            </div>
+          </div>
+        {/snippet}
+
+        <div class="mixer">
+          {#if editorState.loading}
+            {@render faderSkeleton()}
+          {:else}
+            {@render fader('sys', editorState.mixer.sys_vol, editorState.mixer.sys_muted, editorState.system ? t('ed.sysAudio') : t('ed.audio'), editorState.system ? 'headphones' : 'speaker')}
+          {/if}
+          {#if editorState.loading || editorState.mic}
+            <div class="mic-slot" out:fade={{ duration: 300 }}>
+              {#if editorState.loading}
+                {@render faderSkeleton()}
+              {:else}
                 {@render fader('mic', editorState.mixer.mic_vol, editorState.mixer.mic_muted, t('ed.micAudio'), 'mic')}
               {/if}
-            {/if}
-          </div>
+            </div>
+          {/if}
         </div>
         <div class="alanes">
-          {#if !editorState.loading}
-            <div class="lane alane" class:muted={editorState.mixer.sys_muted}>
+          <div class="lane alane" class:muted={editorState.mixer.sys_muted}>
+            <div class="zw">
+              {#if editorState.system}
+                <canvas bind:this={sysCanvas} class="wave" class:ready={primaryPeaksReady}></canvas>
+              {:else}
+                <canvas bind:this={mixCanvas} class="wave" class:ready={primaryPeaksReady}></canvas>
+                {#if primaryNoAudio}<span class="wf-note mono">{t('ed.noAudio')}</span>{/if}
+              {/if}
+              {#if !primaryPeaksReady && !primaryNoAudio}<div class="wf-skeleton"></div>{/if}
+            </div>
+          </div>
+          {#if editorState.loading || editorState.mic}
+            <div class="lane alane" class:muted={editorState.mixer.mic_muted} out:fade={{ duration: 300 }}>
               <div class="zw">
-                {#if editorState.system}
-                  <canvas bind:this={sysCanvas}></canvas>
-                {:else}
-                  <canvas bind:this={mixCanvas}></canvas>
-                  {#if !editorState.mixPeaks}<span class="wf-note mono">{t('ed.noAudio')}</span>{/if}
-                {/if}
+                <canvas bind:this={micCanvas} class="wave" class:ready={!!editorState.micPeaks}></canvas>
+                {#if !editorState.micPeaks}<div class="wf-skeleton"></div>{/if}
               </div>
             </div>
-            {#if editorState.mic}
-              <div class="lane alane" class:muted={editorState.mixer.mic_muted}>
-                <div class="zw">
-                  <canvas bind:this={micCanvas}></canvas>
-                </div>
-              </div>
-            {/if}
           {/if}
         </div>
       </div>
@@ -1285,7 +1325,7 @@
     position: fixed;
     left: 0;
     right: 0;
-    top: var(--topbar-h, 60px);
+    top: calc(var(--topbar-h, 60px) - 1px);
     bottom: 0;
     z-index: 100;
     display: flex;
@@ -1300,14 +1340,14 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 0 14px;
+    padding: 0 14px 0 0;
     border-bottom: 1px solid var(--line);
-    background: var(--bg-1);
+    background: #080808;
     font-size: 12px;
     color: var(--text-3);
   }
   .sub-left { display: flex; align-items: center; gap: 10px; min-width: 0; }
-  .sub-chevrons { display: flex; align-items: center; gap: 5px; }
+  .sub-chevrons { display: flex; align-items: center; justify-content: center; gap: 5px; width: var(--sidebar-w); }
   .sub-btn {
     width: 26px; height: 26px;
     display: grid; place-items: center;
@@ -1362,7 +1402,7 @@
     position: relative;
     flex: 1;
     min-height: 0;
-    background: radial-gradient(120% 90% at 50% 0%, #121214 0%, #0a0a0b 70%, #060607 100%);
+    background: #080808;
     overflow: hidden;
   }
   /* inset: 0 fija una altura definida (vía offsets) para que el vídeo, con max-height:100%,
@@ -1373,7 +1413,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    padding: 22px 40px;
+    padding: 0 40px;
   }
   /* Barra de controles en fullscreen: los mismos 7 botones del editor, flotando centrados
      abajo sobre el vídeo (z por encima del overlay del vídeo). */
@@ -1529,29 +1569,29 @@
     align-items: center;
     gap: 6px;
     justify-self: center;
-    padding: 8px 12px;
+    padding: 4px 12px;
     background: rgba(18, 18, 20, 0.72);
     backdrop-filter: blur(14px);
     border: 1px solid rgba(255, 255, 255, 0.09);
-    border-radius: 16px;
+    border-radius: var(--r-sm);
   }
   .tp-right { display: flex; align-items: center; gap: 6px; justify-self: end; }
 
   .tp-btn {
-    width: 32px; height: 32px;
+    width: 22px; height: 22px;
     display: grid; place-items: center;
-    color: var(--text-1); border-radius: 7px;
-    transition: color 0.14s ease, background 0.14s ease;
+    color: var(--text-2);
+    transition: color 0.14s ease;
   }
-  .tp-btn:hover { color: var(--text-0); background: var(--bg-3); }
+  .tp-btn:hover { color: var(--text-0); }
   .tp-play {
-    width: 36px; height: 36px;
+    width: 24px; height: 24px;
     display: grid; place-items: center;
-    color: var(--text-0);
-    border-radius: 7px; margin: 0 4px; flex-shrink: 0;
-    transition: color 0.14s ease, background 0.14s ease, transform 0.12s ease;
+    color: var(--text-2);
+    margin: 0 4px; flex-shrink: 0;
+    transition: color 0.14s ease, transform 0.12s ease;
   }
-  .tp-play:hover { color: var(--text-0); background: var(--bg-3); }
+  .tp-play:hover { color: var(--text-0); }
   .tp-play:active { transform: scale(0.94); }
 
   .tp-time {
@@ -1560,11 +1600,11 @@
     white-space: nowrap;
     display: inline-flex;
     align-items: center;
-    padding: 10px 15px;
+    padding: 7px 14px;
     background: rgba(18, 18, 20, 0.72);
     backdrop-filter: blur(14px);
     border: 1px solid rgba(255, 255, 255, 0.09);
-    border-radius: 16px;
+    border-radius: var(--r-sm);
   }
   .tp-time .t-cur { color: var(--text-0); }
   .tp-time .t-sep { color: var(--text-3); margin: 0 4px; }
@@ -1644,15 +1684,47 @@
     position: relative;
     border-radius: var(--r-sm);
     overflow: hidden;
-    border: 1px solid var(--line);
-    background: var(--bg-0);
+    background: #0d0d0c;
   }
-  /* Fondo negro: lo que no cubre ninguna sección es el "bloque negro" del montaje (no se exporta).
-     grid-column: 2 mantiene el lane alineado con los de audio tras quitar el gutter de la fila. */
-  .vlane { grid-column: 2; height: 46px; cursor: pointer; background: #000; }
+  /* Fondo unificado #0d0d0c: lo que no cubre ninguna sección es el "bloque negro" del montaje
+     (no se exporta). grid-column: 2 mantiene el lane alineado con los de audio tras quitar el
+     gutter de la fila. */
+  /* Hatch diagonal en la zona sin sección (el "bloque negro" no exportado): indica visualmente
+     que ahí no hay contenido. Los bloques opacos (base #0d0d0c) lo tapan donde sí hay vídeo. */
+  .vlane {
+    grid-column: 2;
+    height: 46px;
+    cursor: pointer;
+    background: repeating-linear-gradient(
+        -45deg,
+        rgba(255, 255, 255, 0.06) 0 6px,
+        transparent 6px 12px
+      ),
+      #0d0d0c;
+  }
   .alane { height: 50px; transition: opacity 0.16s ease; }
   .alane.muted { opacity: 0.5; }
-  .alane canvas { display: block; width: 100%; height: 100%; }  .wf-note {
+  .alane canvas { display: block; width: 100%; height: 100%; }
+  /* La onda entra con fade cuando ya tiene peaks; el skeleton la sustituye mientras carga. */
+  .alane canvas.wave { opacity: 0; transition: opacity 0.4s ease; }
+  .alane canvas.wave.ready { opacity: 1; }
+  .wf-skeleton {
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 50%;
+    height: 2px;
+    transform: translateY(-50%);
+    border-radius: 2px;
+    background: rgba(255, 255, 255, 0.05);
+    animation: wf-pulse 1.15s ease-in-out infinite;
+    pointer-events: none;
+  }
+  @keyframes wf-pulse {
+    0%, 100% { opacity: 0.4; }
+    50% { opacity: 0.9; }
+  }
+  .wf-note {
     position: absolute;
     top: 50%;
     left: 12px;
@@ -1663,29 +1735,21 @@
 
   .block {
     position: absolute;
-    top: 3px;
-    bottom: 3px;
+    top: 0;
+    bottom: 0;
     border-radius: 5px;
-    background: linear-gradient(
-      180deg,
-      color-mix(in srgb, var(--accent) 28%, transparent),
-      color-mix(in srgb, var(--accent) 17%, transparent)
-    );
-    border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--line));
+    background: #0d0d0c;
+    border: 1px solid rgba(172, 172, 174, 0.3);
     cursor: pointer;
     overflow: hidden;
     transition: left 0.16s cubic-bezier(0.22, 1, 0.36, 1), transform 0.12s ease,
-      box-shadow 0.12s ease, border-color 0.12s ease, background 0.12s ease, opacity 0.12s ease;
+      box-shadow 0.12s ease, border-color 0.12s ease, background 0.12s ease, filter 0.12s ease;
   }
-  .block:hover { border-color: color-mix(in srgb, var(--accent) 62%, var(--line)); }
+  .block:hover { border-color: rgba(172, 172, 174, 0.55); }
   .block.active {
-    background: linear-gradient(
-      180deg,
-      color-mix(in srgb, var(--accent) 44%, transparent),
-      color-mix(in srgb, var(--accent) 27%, transparent)
-    );
-    border-color: var(--accent-soft);
-    box-shadow: 0 0 0 1px var(--accent-soft), 0 4px 16px -6px var(--accent-glow);
+    background: #0d0d0c;
+    border-color: rgb(172, 172, 174);
+    box-shadow: 0 0 0 1px rgb(172, 172, 174), 0 4px 16px -6px rgba(172, 172, 174, 0.35);
   }
   /* Bloque levantado: sigue al cursor (sin transición de `left`), escalado y elevado. */
   .block.lifted {
@@ -1698,42 +1762,23 @@
   }
   /* Imán: mientras se reordena, los demás bloques se atenúan y se deslizan para hacer hueco. */
   .vlane.reordering { overflow: visible; }
-  .vlane.reordering .block:not(.lifted) { opacity: 0.72; }
+  .vlane.reordering .block:not(.lifted) { filter: brightness(0.62); }
   /* Al recortar, el borde debe seguir al cursor al instante (sin la animación de `left`). */
   .vlane.trimming .block { transition: none; }
   /* Bloque desactivado: se ignora en reproducción/exportación pero sigue visible para reactivarlo.
-     Atenuado, desaturado y con tramado diagonal; sin el resplandor de selección. */
+     Sólido y solo atenuado (desaturado + oscurecido), SIN tramado: las rayas leerían como "zona sin
+     vídeo". Así sigue pareciendo un segmento, pero apagado; sin el resplandor de selección. */
   .block.disabled {
-    opacity: 0.5;
-    filter: grayscale(1);
-    background:
-      repeating-linear-gradient(
-        -45deg,
-        rgba(255, 255, 255, 0.06) 0,
-        rgba(255, 255, 255, 0.06) 6px,
-        rgba(255, 255, 255, 0.015) 6px,
-        rgba(255, 255, 255, 0.015) 12px
-      ),
-      var(--bg-2);
+    filter: grayscale(1) brightness(0.5);
     border-color: var(--line-strong);
     box-shadow: none;
-  }
-  .block.disabled .block-n { color: rgba(255, 255, 255, 0.5); }
-  .block-n {
-    position: absolute;
-    top: 3px;
-    left: 6px;
-    font-size: 10px;
-    font-weight: 600;
-    color: rgba(255, 255, 255, 0.7);
-    pointer-events: none;
   }
   .grip {
     position: absolute;
     top: -1px;
     bottom: -1px;
-    width: 9px;
-    background: var(--accent-soft);
+    width: 6px;
+    background: rgb(172, 172, 174);
     cursor: ew-resize;
     z-index: 3;
   }
@@ -1744,9 +1789,9 @@
     left: 50%;
     transform: translate(-50%, -50%);
     width: 2px;
-    height: 14px;
+    height: 18px;
     border-radius: 2px;
-    background: rgba(255, 255, 255, 0.85);
+    background: #080808;
   }
   .grip.start { left: -1px; border-radius: 5px 0 0 5px; }
   .grip.end { right: -1px; border-radius: 0 5px 5px 0; }
@@ -1831,37 +1876,79 @@
   }
   .shot-open:hover { text-decoration: underline; }
 
-  /* Card del mezclador: píldora flotante en el gutter, alineada con las lanes de audio. Dos filas
-     horizontales (sistema arriba, micrófono abajo), cada una a la altura de su onda (50px, gap 7).
-     La elevación = padding vertical, para que la 1ª fila cuadre con la lane de sistema sin hueco. */
+  /* Mezclador: una card por canal en el gutter, alineadas 1:1 con las lanes de audio (50px, gap 7).
+     Cada card: icono pequeño a la izquierda; a la derecha, etiqueta arriba y slider abajo. */
   .arow { display: grid; grid-template-columns: var(--gutter) 1fr; align-items: start; }
-  .mixer-card {
-    --pad-v: 7px;
+  .mixer {
     position: sticky;
     left: 0;
     z-index: 25;
-    justify-self: start;
-    width: max-content;
-    margin-left: 2px;
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
     margin-right: 12px;
-    padding: var(--pad-v) 13px;
+  }
+  .audio-card {
+    height: 50px;
+    box-sizing: border-box;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    padding: 0 11px;
     background: rgba(18, 18, 20, 0.72);
     backdrop-filter: blur(14px);
     border: 1px solid rgba(255, 255, 255, 0.09);
-    border-radius: 16px;
+    border-radius: var(--r-sm);
     box-shadow: 0 16px 44px rgba(0, 0, 0, 0.5);
-    transform: translateY(calc(-1 * var(--pad-v)));
-    margin-bottom: calc(-1 * var(--pad-v));
   }
-  .faders { display: flex; flex-direction: column; gap: 7px; }
-  .hfader { display: flex; align-items: center; gap: 8px; height: 50px; }
-  /* El cursor controla el centro del pulgar; relleno y pulgar descuentan su ancho (--th) del
-     recorrido. --v = volumen [0..1] (lo fija el componente por canal). */
+  .ac-body {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    gap: 4px;
+  }
+  .ac-label {
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    color: var(--text-2);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  /* Skeleton de la card: misma silueta (icono + etiqueta + slider) con el pulso de la onda. */
+  .audio-card.sk { pointer-events: none; }
+  .sk-ico {
+    flex-shrink: 0;
+    width: 24px;
+    height: 24px;
+    border-radius: 7px;
+    background: rgba(255, 255, 255, 0.05);
+    animation: wf-pulse 1.15s ease-in-out infinite;
+  }
+  .sk-label {
+    width: 84px;
+    height: 8px;
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.05);
+    animation: wf-pulse 1.15s ease-in-out infinite;
+  }
+  .sk-rail {
+    width: 100%;
+    height: 6px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.05);
+    animation: wf-pulse 1.15s ease-in-out infinite;
+  }
+  /* Slider horizontal: el pulgar (más ancho que alto) recorre el eje X; relleno y pulgar descuentan
+     su ancho (--th, en sync con VOL_THUMB en el script). --v = volumen [0..1]. */
   .hfader-rail {
-    --th: 16px;
+    --th: 22px;
     position: relative;
-    width: 140px;
-    height: 34px;
+    width: 100%;
+    height: 16px;
     cursor: pointer;
     outline: none;
   }
@@ -1871,7 +1958,7 @@
     top: 50%;
     left: 0;
     right: 0;
-    height: 8px;
+    height: 6px;
     transform: translateY(-50%);
     border-radius: 999px;
     overflow: hidden;
@@ -1893,13 +1980,14 @@
     display: grid;
     place-items: center;
     width: var(--th);
-    height: 22px;
+    height: 14px;
     border-radius: 5px;
     background: #fff;
     box-shadow: 0 2px 6px rgba(0, 0, 0, 0.55);
     pointer-events: none;
   }
   .thumb-line { width: 2px; height: 10px; border-radius: 2px; background: #080808; }
+  .hfader-thumb .thumb-line { width: 10px; height: 2px; }
   /* Burbuja flotante (fixed) posicionada por JS sobre el pulgar; vive a nivel del overlay para que
      el overflow de la timeline no la recorte. translate(-50%,-100%) deja su base sobre el pulgar. */
   .fader-tip {
@@ -1916,18 +2004,18 @@
     pointer-events: none;
     z-index: 300;
   }
-  .hfader-ico {
+  .ac-ico {
     flex-shrink: 0;
-    width: 32px;
-    height: 32px;
+    width: 24px;
+    height: 24px;
     display: grid;
     place-items: center;
     color: var(--text-0);
-    border-radius: 9px;
+    border-radius: 7px;
     transition: color 0.14s ease, background 0.14s ease;
   }
-  .hfader-ico:hover { background: var(--bg-3); }
-  .hfader-ico.on { color: var(--rec); }
+  .ac-ico:hover { background: var(--bg-3); }
+  .ac-ico.on { color: var(--rec); }
   /* Animación al mutear: el icono se re-monta ({#key}) y hace un "pop". */
   .ico-pop { display: grid; place-items: center; animation: mutePop 0.28s ease; }
   @keyframes mutePop {
@@ -1936,7 +2024,7 @@
     70% { transform: scale(1.15); }
     100% { transform: scale(1); }
   }
-  .hfader.muted .hfader-rail { opacity: 0.4; transition: opacity 0.16s ease; }
+  .audio-card.muted .hfader-rail { opacity: 0.4; transition: opacity 0.16s ease; }
   .alanes { display: flex; flex-direction: column; gap: 7px; min-width: 0; }
 
   /* Popup de progreso de exportación: bloquea la interacción mientras recodifica. */

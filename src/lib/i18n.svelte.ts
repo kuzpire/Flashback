@@ -235,7 +235,7 @@ const en: Record<string, string> = {
   'ed.watermark': 'Watermark',
   'ed.watermarkOn': 'Watermark on export',
   'ed.watermarkPos': 'Watermark position',
-  'ed.micAudio': 'Microphone audio',
+  'ed.micAudio': 'Microphone',
   'ed.sysAudio': 'System audio',
   'ed.audio': 'Audio',
   'ed.mute': 'Mute {label}',
