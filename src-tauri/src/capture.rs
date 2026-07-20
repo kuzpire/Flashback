@@ -1083,6 +1083,24 @@ mod win {
         }
     }
 
+    // Destino de los paquetes de vídeo ya codificados que emite el pump. Dos implementaciones:
+    // el ring buffer del Instant Replay (RAM, acotado por segundos) y el muxer en directo de la
+    // grabación manual (disco). El pump habla con este trait para compartir un solo pipeline de
+    // codificación entre ambos modos (CLAUDE.md §4).
+    trait VideoPacketSink: Send + Sync + 'static {
+        fn set_seq_header(&self, bytes: Vec<u8>);
+        fn push_video(&self, data: Vec<u8>, time: i64, dur: i64, key: bool);
+    }
+
+    impl VideoPacketSink for Mutex<ReplayBuffer> {
+        fn set_seq_header(&self, bytes: Vec<u8>) {
+            self.lock().unwrap().seq_header = bytes;
+        }
+        fn push_video(&self, data: Vec<u8>, time: i64, dur: i64, key: bool) {
+            self.lock().unwrap().push(data, time, dur, key);
+        }
+    }
+
     struct ReplayRunning {
         stop: Arc<AtomicBool>,
         handle: Option<JoinHandle<()>>,
@@ -1342,6 +1360,8 @@ mod win {
         // empieza a bufferear solo, sin reactivar el replay a mano. Si la sesión se corta y no
         // se pidió parar, se reintenta (reconexión). En modo monitor un fallo es definitivo.
         let window_mode = target == "window";
+        // El pump escribe a través de VideoPacketSink; el replay usa el ring buffer como sink.
+        let video_sink: Arc<dyn VideoPacketSink> = buffer.clone();
         let mut announced = false;
         // El pump anterior salió por retarget: la próxima reconstrucción exitosa apunta a otra
         // ventana del juego, así que al lograrla se avisa a la UI (toast "Listo para clipear").
@@ -1365,7 +1385,7 @@ mod win {
                     } else if retargeting {
                         on_retarget();
                     }
-                    run_pump(&pipe, &stop, &buffer, window_mode);
+                    run_pump(&pipe, &stop, &video_sink, window_mode);
                     let lost = pipe.device_lost.load(Ordering::SeqCst);
                     let retargeted = pipe.retarget.load(Ordering::SeqCst);
                     teardown_replay(pipe);
@@ -2154,13 +2174,13 @@ mod win {
     fn run_pump(
         pipe: &ReplayPipeline,
         stop: &Arc<AtomicBool>,
-        buffer: &Arc<Mutex<ReplayBuffer>>,
+        sink: &Arc<dyn VideoPacketSink>,
         window_mode: bool,
     ) {
         if pipe.enc_events.is_some() {
-            run_pump_async(pipe, stop, buffer, window_mode);
+            run_pump_async(pipe, stop, sink, window_mode);
         } else {
-            run_pump_sync(pipe, stop, buffer, window_mode);
+            run_pump_sync(pipe, stop, sink, window_mode);
         }
     }
 
@@ -2203,7 +2223,7 @@ mod win {
     fn feed_encoder_async(
         enc: &IMFTransform,
         nv12: &IMFSample,
-        buffer: &Arc<Mutex<ReplayBuffer>>,
+        sink: &Arc<dyn VideoPacketSink>,
         seq_grabbed: &mut bool,
         pts_fifo: &mut VecDeque<i64>,
     ) -> bool {
@@ -2211,7 +2231,7 @@ mod win {
             match unsafe { enc.ProcessInput(0, nv12, 0) } {
                 Ok(()) => return true,
                 Err(e) if e.code() == MF_E_NOTACCEPTING => {
-                    let n = drain_encoder_output(enc, buffer, seq_grabbed, pts_fifo).unwrap_or(0);
+                    let n = drain_encoder_output(enc, sink, seq_grabbed, pts_fifo).unwrap_or(0);
                     if n == 0 {
                         std::thread::sleep(Duration::from_millis(1));
                     }
@@ -2240,7 +2260,7 @@ mod win {
     fn run_pump_async(
         pipe: &ReplayPipeline,
         stop: &Arc<AtomicBool>,
-        buffer: &Arc<Mutex<ReplayBuffer>>,
+        sink: &Arc<dyn VideoPacketSink>,
         window_mode: bool,
     ) {
         let fps = pipe.fps;
@@ -2255,7 +2275,7 @@ mod win {
         // las texturas BGRA en vuelo (del ring de pipe) siguen vivas mientras el worker las usa.
         std::thread::scope(|s| {
             let inflight_w = inflight.clone();
-            s.spawn(move || run_encoder_thread(pipe, buffer, stop, rx, inflight_w));
+            s.spawn(move || run_encoder_thread(pipe, sink, stop, rx, inflight_w));
 
             // Seguimiento de minimizado y composición del cartel "fuera de foco" (ver FocusState).
             let mut foc = FocusState::new();
@@ -2394,7 +2414,7 @@ mod win {
     // satura: los stalls se absorben como latencia en la cola (buffer BGRA), no como bajón.
     fn run_encoder_thread(
         pipe: &ReplayPipeline,
-        buffer: &Arc<Mutex<ReplayBuffer>>,
+        sink: &Arc<dyn VideoPacketSink>,
         stop: &Arc<AtomicBool>,
         rx: mpsc::Receiver<SendItem>,
         inflight: Arc<AtomicUsize>,
@@ -2430,7 +2450,7 @@ mod win {
                 if et == ME_TRANSFORM_NEED_INPUT {
                     need += 1;
                 } else if et == ME_TRANSFORM_HAVE_OUTPUT {
-                    let _ = drain_encoder_output(encoder, buffer, &mut seq_grabbed, &mut pts_fifo);
+                    let _ = drain_encoder_output(encoder, sink, &mut seq_grabbed, &mut pts_fifo);
                 }
             }
 
@@ -2477,7 +2497,7 @@ mod win {
                 if item.force_key {
                     force_keyframe(encoder);
                 }
-                if feed_encoder_async(encoder, &nv12, buffer, &mut seq_grabbed, &mut pts_fifo) {
+                if feed_encoder_async(encoder, &nv12, sink, &mut seq_grabbed, &mut pts_fifo) {
                     pts_fifo.push_back(item.pts);
                     did = true;
                 } else if device_removed(&pipe._device) {
@@ -2501,7 +2521,7 @@ mod win {
     fn run_pump_sync(
         pipe: &ReplayPipeline,
         stop: &Arc<AtomicBool>,
-        buffer: &Arc<Mutex<ReplayBuffer>>,
+        sink: &Arc<dyn VideoPacketSink>,
         window_mode: bool,
     ) {
         let fps = pipe.fps;
@@ -2547,7 +2567,7 @@ mod win {
                     if let Some(c) = pipe.card.as_ref() {
                         let slot = emitted + 1;
                         let pts = cfr_pts(slot, fps).max(emitted_pts + 1);
-                        encode_one(pipe, buffer, &c.tex, pts, &mut seq_grabbed, &mut pts_fifo);
+                        encode_one(pipe, sink, &c.tex, pts, &mut seq_grabbed, &mut pts_fifo);
                         emitted = slot;
                         emitted_pts = pts;
                     }
@@ -2578,7 +2598,7 @@ mod win {
                 while emitted < cur {
                     let slot = emitted + 1;
                     let pts = cfr_pts(slot, fps).max(emitted_pts + 1);
-                    encode_one(pipe, buffer, &src, pts, &mut seq_grabbed, &mut pts_fifo);
+                    encode_one(pipe, sink, &src, pts, &mut seq_grabbed, &mut pts_fifo);
                     emitted = slot;
                     emitted_pts = pts;
                 }
@@ -2593,7 +2613,7 @@ mod win {
     // bombeo, así que aquí no se rebasa nada.
     fn encode_one(
         pipe: &ReplayPipeline,
-        buffer: &Arc<Mutex<ReplayBuffer>>,
+        sink: &Arc<dyn VideoPacketSink>,
         bgra: &ID3D11Texture2D,
         pts: i64,
         seq_grabbed: &mut bool,
@@ -2621,7 +2641,7 @@ mod win {
                     break;
                 }
                 Err(e) if e.code() == MF_E_NOTACCEPTING => {
-                    let _ = drain_encoder_output(&pipe.encoder, buffer, seq_grabbed, pts_fifo);
+                    let _ = drain_encoder_output(&pipe.encoder, sink, seq_grabbed, pts_fifo);
                 }
                 Err(_) => {
                     if device_removed(&pipe._device) {
@@ -2633,7 +2653,7 @@ mod win {
         }
         if fed_ok {
             pts_fifo.push_back(pts);
-            let _ = drain_encoder_output(&pipe.encoder, buffer, seq_grabbed, pts_fifo);
+            let _ = drain_encoder_output(&pipe.encoder, sink, seq_grabbed, pts_fifo);
         }
     }
 
@@ -2881,7 +2901,7 @@ mod win {
 
     fn drain_encoder_output(
         enc: &IMFTransform,
-        buffer: &Arc<Mutex<ReplayBuffer>>,
+        sink: &Arc<dyn VideoPacketSink>,
         seq_grabbed: &mut bool,
         pts_fifo: &mut VecDeque<i64>,
     ) -> Result<usize> {
@@ -2899,7 +2919,7 @@ mod win {
             if !*seq_grabbed {
                 if let Ok(mt) = unsafe { enc.GetOutputCurrentType(0) } {
                     if let Some(h) = blob(&mt, &MF_MT_MPEG_SEQUENCE_HEADER) {
-                        buffer.lock().unwrap().seq_header = h;
+                        sink.set_seq_header(h);
                         *seq_grabbed = true;
                     }
                 }
@@ -2918,14 +2938,14 @@ mod win {
                     if !*seq_grabbed {
                         let ps = extract_param_sets(&data);
                         if !ps.is_empty() {
-                            buffer.lock().unwrap().seq_header = ps;
+                            sink.set_seq_header(ps);
                             *seq_grabbed = true;
                         }
                     }
                     // El tiempo real lo pone el FIFO de entrada; el del encoder solo
                     // sirve de respaldo si por algún motivo el FIFO se vaciara.
                     let time = pts_fifo.pop_front().unwrap_or(enc_time);
-                    buffer.lock().unwrap().push(data, time, dur, key);
+                    sink.push_video(data, time, dur, key);
                     drained += 1;
                 }
             }
