@@ -118,9 +118,9 @@ mod win {
     use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
     use windows::Win32::Graphics::Direct3D11::{
         D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext, ID3D11Multithread, ID3D11Texture2D,
-        D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_CPU_ACCESS_FLAG,
+        D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE,
         D3D11_CPU_ACCESS_READ, D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
-        D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_RESOURCE_MISC_FLAG, D3D11_SDK_VERSION,
+        D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_SDK_VERSION,
         D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_USAGE_STAGING,
     };
     use windows::Win32::Graphics::Dxgi::Common::{
@@ -339,16 +339,18 @@ mod win {
         let _timer = TimerRes::new();
         let _mmcss = MmcssTask::new("Capture");
 
-        let mut engine = match resolve_target_item(&target).and_then(|item| {
-            build_engine(
+        // Mismo pipeline que el Instant Replay (encoder de vídeo con VBR limpio + AAC), pero
+        // volcando los paquetes a un muxer en directo (LiveMux) en vez de al ring buffer.
+        let (pipe, mux, video_sink) = match resolve_target_item(&target).and_then(|item| {
+            build_manual(
                 &stats, item, &out_dir, fps, factor, resolution, bitrate_override, mic, mic_device,
                 &encoder_pref,
             )
             .map_err(|e| format!("{e:?}"))
         }) {
-            Ok(e) => {
+            Ok(v) => {
                 let _ = ready.send(Ok(()));
-                e
+                v
             }
             Err(e) => {
                 let _ = ready.send(Err(e));
@@ -357,553 +359,47 @@ mod win {
             }
         };
 
-        // Cadencia CFR: el handler de WGC solo refresca el "último frame"; aquí emitimos uno
-        // por slot de reloj (duplicando el último si no llegó otro), de modo que el clip salga
-        // a fps constante. Se espera con wait_timeout para reaccionar al instante a stop().
-        let enc = engine.encoder.clone();
-        let interval = fps_interval(fps).max(1);
-        let mut t0: Option<Instant> = None;
-        let mut emitted: i64 = -1;
-        let (lock, cv) = &*stop;
-        loop {
-            {
-                let mut e = enc.lock().unwrap();
-                if let Some(frame_slot) = e.latest_slot(interval) {
-                    let start = *t0.get_or_insert_with(Instant::now);
-                    let wall = elapsed_slots(start, interval);
-                    // Cadencia guiada por el timestamp del frame (fase estable => sin batido); el
-                    // reloj de pared solo rellena duplicados en congelados reales (>=STALL_SLOTS).
-                    let cur = if wall - frame_slot >= STALL_SLOTS { wall - 1 } else { frame_slot };
-                    // Sobrecarga (encoder por debajo de la tasa): no acumular retraso sin fin;
-                    // resincronizar cerca del slot actual. A 60 fps no debería ocurrir.
-                    if cur - emitted > fps as i64 {
-                        emitted = cur - 1;
-                    }
-                    while emitted < cur {
-                        emitted += 1;
-                        let pts = cfr_pts(emitted, fps);
-                        let dur = cfr_pts(emitted + 1, fps) - pts;
-                        let _ = e.emit_paced(pts, dur);
-                    }
-                }
+        // El pump espera un Arc<AtomicBool>; un hilo puente traduce el stop público
+        // (Mutex/Condvar) a ese atómico para reaccionar al instante.
+        let pump_stop = Arc::new(AtomicBool::new(false));
+        let bridge_stop = pump_stop.clone();
+        let bridge_signal = stop.clone();
+        let bridge = std::thread::spawn(move || {
+            let (lock, cv) = &*bridge_signal;
+            let mut stopped = lock.lock().unwrap();
+            while !*stopped {
+                let (s, _) = cv.wait_timeout(stopped, Duration::from_millis(100)).unwrap();
+                stopped = s;
             }
-            let stopped = lock.lock().unwrap();
-            if *stopped {
-                break;
-            }
-            let (stopped, _) = cv.wait_timeout(stopped, pace_sleep(interval)).unwrap();
-            if *stopped {
-                break;
-            }
-            drop(stopped);
+            bridge_stop.store(true, Ordering::SeqCst);
+        });
+
+        // La grabación manual usa el camino "monitor" del pump (window_mode=false): sin cartel de
+        // fuera de foco ni pausa por minimizado (funciones del Instant Replay en segundo plano).
+        run_pump(&pipe, &pump_stop, &video_sink, false);
+
+        // Orden de parada: cortar primero las fuentes (WGC + audio) para que el flush final de
+        // audio vea las colas completas, y luego cerrar el MP4.
+        teardown_replay(pipe);
+        *result.lock().unwrap() = mux.finalize();
+
+        // Si el pump salió por su cuenta (no por stop del usuario), destraba el hilo puente.
+        {
+            let (lock, cv) = &*stop;
+            *lock.lock().unwrap() = true;
+            cv.notify_all();
         }
-
-        // Orden de parada: cortar primero la llegada de frames (para que ningún
-        // WriteSample corra contra Finalize) y luego cerrar el MP4.
-        engine.shutdown();
-        *result.lock().unwrap() = engine.finalize_encoder();
-
-        drop(engine);
+        let _ = bridge.join();
         unsafe { CoUninitialize() };
     }
 
-    struct Engine {
-        _device: ID3D11Device,
-        frame_pool: Direct3D11CaptureFramePool,
-        session: GraphicsCaptureSession,
-        token: i64,
-        encoder: Arc<Mutex<Encoder>>,
-        audio_tracks: Vec<audio::TrackHandle>,
-    }
-
-    impl Engine {
-        fn shutdown(&mut self) {
-            let _ = self.frame_pool.RemoveFrameArrived(self.token);
-            let _ = self.session.Close();
-            for track in &mut self.audio_tracks {
-                track.stop();
-            }
-        }
-
-        fn finalize_encoder(&self) -> Option<String> {
-            self.encoder.lock().unwrap().finalize()
-        }
-    }
-
-    impl Drop for Engine {
-        fn drop(&mut self) {
-            let _ = self.frame_pool.RemoveFrameArrived(self.token);
-            let _ = self.session.Close();
-            let _ = self.frame_pool.Close();
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn build_engine(
-        stats: &Arc<Stats>,
-        item: GraphicsCaptureItem,
-        out_dir: &str,
-        fps: u32,
-        factor: f64,
-        resolution: u32,
-        bitrate_override: u32,
-        mic: bool,
-        mic_device: String,
-        encoder_pref: &str,
-    ) -> Result<Engine> {
-        let (device, d3d_device) = create_device()?;
-        // NV12/H.264 exigen dimensiones PARES (ver nota en build_replay): la ventana de un
-        // juego puede ser impar y disparaba MF_E_INVALIDMEDIATYPE. Redondear a par.
-        let mut size = item.Size()?;
-        size.Width = size.Width.max(2) & !1;
-        size.Height = size.Height.max(2) & !1;
-        let width = size.Width as u32;
-        let height = size.Height as u32;
-        // Se captura a nativo y el encoder escala al objetivo (downscale). El bitrate se
-        // calcula sobre la resolución de salida, no la de captura.
-        let (out_w, out_h) = output_dims(width, height, resolution);
-        let bitrate = resolve_bitrate(out_w, out_h, fps, factor, bitrate_override);
-
-        // Sistema: loopback siempre, en ambos modos de captura (pantalla y aplicación).
-        // Micrófono: solo si el toggle está activo y hay dispositivo elegido. Se declara el
-        // stream con el formato AAC admisible (downmix a estéreo); la captura es a nativo.
-        let sys_native = audio::probe_format(&audio::TrackKind::SystemLoopback);
-        let mic_native = if mic && !mic_device.is_empty() {
-            let f = audio::probe_format(&audio::TrackKind::Microphone(mic_device.clone()));
-            if f.is_none() {
-                eprintln!("audio: no se pudo abrir el micrófono (device='{mic_device}')");
-            }
-            f
-        } else {
-            if mic {
-                eprintln!("audio: micrófono activado pero sin dispositivo seleccionado");
-            }
-            None
-        };
-        let sys_target = sys_native.and_then(|(r, c)| audio::aac_target_format(r, c));
-        let mic_target = mic_native.and_then(|(r, c)| audio::aac_target_format(r, c));
-
-        let out_path = format!("{out_dir}\\{}", clip_filename());
-        let encoder = Arc::new(Mutex::new(Encoder::new(
-            &device, width, height, out_w, out_h, fps, bitrate, out_path, sys_target,
-            mic_target, encoder_pref,
-        )?));
-
-        let frame_pool = Direct3D11CaptureFramePool::CreateFreeThreaded(
-            &d3d_device,
-            DirectXPixelFormat::B8G8R8A8UIntNormalized,
-            2,
-            size,
-        )?;
-        let session = frame_pool.CreateCaptureSession(&item)?;
-        // Sin el borde de captura de WGC (si el SO lo permite): no queremos esa línea de
-        // color alrededor de la ventana/pantalla dentro del clip grabado.
-        let _ = session.SetIsBorderRequired(false);
-        set_capture_rate(&session, fps);
-
-        // El handler corre en el pool de hilos del sistema (frame pool free-threaded):
-        // recoge la textura del frame y la empuja al encoder por hardware. La textura
-        // WGC se copia GPU→GPU dentro del encoder (no baja a CPU): el camino sagrado.
-        // El límite de FPS descarta frames antes de tocar la GPU para no encodear de más.
-        let stats = stats.clone();
-        let enc = encoder.clone();
-        let interval = fps_interval(fps);
-        let selector = Arc::new(SlotSelector::new());
-        let handler = TypedEventHandler::<Direct3D11CaptureFramePool, IInspectable>::new(
-            move |pool, _| {
-                ensure_handler_priority();
-                if let Some(pool) = pool.as_ref() {
-                    if let Ok(frame) = pool.TryGetNextFrame() {
-                        if let Ok(s) = frame.ContentSize() {
-                            stats.width.store(s.Width.max(0) as u32, Ordering::Relaxed);
-                            stats.height.store(s.Height.max(0) as u32, Ordering::Relaxed);
-                        }
-                        let t = frame.SystemRelativeTime().map(|x| x.Duration).unwrap_or(0);
-                        if selector.keep(t, interval) {
-                            if let Ok(surface) = frame.Surface() {
-                                if let Ok(access) = surface.cast::<IDirect3DDxgiInterfaceAccess>() {
-                                    if let Ok(tex) =
-                                        unsafe { access.GetInterface::<ID3D11Texture2D>() }
-                                    {
-                                        // Solo refresca el "último frame" (copia GPU→GPU); la
-                                        // emisión a cadencia CFR la hace el hilo de captura.
-                                        enc.lock().unwrap().note_frame(&tex, t);
-                                    }
-                                }
-                            }
-                            stats.frames.fetch_add(1, Ordering::Relaxed);
-                        }
-                        let _ = frame.Close();
-                    }
-                }
-                Ok(())
-            },
-        );
-        let token = frame_pool.FrameArrived(&handler)?;
-
-        let mut audio_tracks = Vec::new();
-        if let (Some((rate, ch)), Some(_)) = (sys_native, sys_target) {
-            let stream = encoder.lock().unwrap().sys_audio_stream.expect("stream de sistema declarado");
-            let sink = Arc::new(EncoderAudioSink { encoder: encoder.clone(), stream });
-            audio_tracks.push(audio::spawn_track(
-                audio::TrackKind::SystemLoopback,
-                audio::Encoding::Pcm,
-                rate,
-                ch,
-                sink,
-                None,
-            ));
-        }
-        if let (Some((rate, ch)), Some(_)) = (mic_native, mic_target) {
-            let stream = encoder.lock().unwrap().mic_audio_stream.expect("stream de mic declarado");
-            let sink = Arc::new(EncoderAudioSink { encoder: encoder.clone(), stream });
-            audio_tracks.push(audio::spawn_track(
-                audio::TrackKind::Microphone(mic_device.clone()),
-                audio::Encoding::Pcm,
-                rate,
-                ch,
-                sink,
-                None,
-            ));
-        }
-
-        session.StartCapture()?;
-
-        Ok(Engine {
-            _device: device,
-            frame_pool,
-            session,
-            token,
-            encoder,
-            audio_tracks,
-        })
-    }
-
-    // Device D3D11 con soporte BGRA (obligatorio para el interop de WGC) y de vídeo
-    // (lo exige Media Foundation para codificar por hardware compartiendo el device),
-    // más su equivalente WinRT IDirect3DDevice, que es lo que consume el frame pool.
-    fn create_device() -> Result<(ID3D11Device, IDirect3DDevice)> {
-        let mut device: Option<ID3D11Device> = None;
-        unsafe {
-            D3D11CreateDevice(
-                None,
-                D3D_DRIVER_TYPE_HARDWARE,
-                HMODULE::default(),
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
-                None,
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                None,
-                None,
-            )?;
-        }
-        let device = device.expect("D3D11CreateDevice no devolvió device");
-        let dxgi: IDXGIDevice = device.cast()?;
-        // Prioridad de scheduling GPU máxima para este device (dentro de nuestro proceso).
-        let _ = unsafe { dxgi.SetGPUThreadPriority(7) };
-        let inspectable = unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi)? };
-        let d3d_device: IDirect3DDevice = inspectable.cast()?;
-        Ok((device, d3d_device))
-    }
-
-    // Encoder H.264 por hardware vía Media Foundation. El SinkWriter hospeda el MFT
-    // por hardware (NVENC/AMF/QSV) y el conversor de color BGRA→NV12, ambos en GPU
-    // gracias al DXGI device manager que comparte nuestro ID3D11Device. Le damos las
-    // texturas BGRA de WGC y escribe el MP4 (H.264) directamente.
-    struct Encoder {
-        writer: IMFSinkWriter,
-        stream: u32,
-        sys_audio_stream: Option<u32>,
-        mic_audio_stream: Option<u32>,
-        ctx: ID3D11DeviceContext,
-        pool: Vec<ID3D11Texture2D>,
-        next: usize,
-        // Índice en `pool` del último frame real recibido de WGC; lo emite la cadencia CFR,
-        // duplicándolo en los slots sin frame nuevo. None hasta que llega el primero.
-        latest: Option<usize>,
-        base: i64,
-        has_base: bool,
-        // Timestamp WGC (SystemRelativeTime) del último frame real: ancla la rejilla CFR al reloj
-        // del juego para que la cadencia no bata con el reloj de pared (evita micro-tirones).
-        last_time: i64,
-        path: String,
-        finalized: bool,
-        audio_err_logged: bool,
-    }
-
-    // El handler de FrameArrived exige Send+Sync. El Encoder solo se toca bajo el
-    // Mutex y desde el callback (que WGC serializa), con el device protegido para
-    // multihilo, así que moverlo entre hilos de forma sincronizada es seguro.
-    unsafe impl Send for Encoder {}
-
-    impl Encoder {
-        // (in_w,in_h) = resolución de captura nativa que se le entrega; (out_w,out_h) =
-        // resolución del MP4. Si difieren, el SinkWriter intercala un Video Processor que
-        // escala (en GPU, vía el device manager compartido) antes del encoder H.264.
-        #[allow(clippy::too_many_arguments)]
-        fn new(
-            device: &ID3D11Device,
-            in_w: u32,
-            in_h: u32,
-            out_w: u32,
-            out_h: u32,
-            fps: u32,
-            bitrate: u32,
-            path: String,
-            sys_audio: Option<(u32, u16)>,
-            mic_audio: Option<(u32, u16)>,
-            encoder_pref: &str,
-        ) -> Result<Encoder> {
-            ensure_mf();
-
-            // Compartir el mismo device con MF: así el encoder lee nuestras texturas
-            // sin copiarlas a CPU. El device debe estar protegido para multihilo.
-            let mut token = 0u32;
-            let mut manager: Option<IMFDXGIDeviceManager> = None;
-            unsafe { MFCreateDXGIDeviceManager(&mut token, &mut manager)? };
-            let manager = manager.ok_or_else(null_out)?;
-            unsafe { manager.ResetDevice(device, token)? };
-
-            let ctx = unsafe { device.GetImmediateContext()? };
-            if let Ok(mt) = ctx.cast::<ID3D11Multithread>() {
-                let _ = unsafe { mt.SetMultithreadProtected(true) };
-            }
-
-            let use_hw = encoder_pref != "Software"
-                && std::env::var_os("FLASHBACK_FORCE_SW_ENCODER").is_none();
-            let attrs = unsafe {
-                let mut a: Option<IMFAttributes> = None;
-                MFCreateAttributes(&mut a, 3)?;
-                let a = a.ok_or_else(null_out)?;
-                if use_hw {
-                    a.SetUINT32(&MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, 1)?;
-                    a.SetUnknown(&MF_SINK_WRITER_D3D_MANAGER, &manager)?;
-                }
-                a.SetUINT32(&MF_SINK_WRITER_DISABLE_THROTTLING, 1)?;
-                a
-            };
-
-            let url = HSTRING::from(path.as_str());
-            let writer = unsafe { MFCreateSinkWriterFromURL(&url, None, &attrs)? };
-
-            // fps nominal: WGC no entrega duplicados, así que el ritmo real lo marcan los
-            // timestamps por muestra; aquí es metadato/objetivo del rate control. El
-            // límite real de FPS lo aplica el handler descartando frames.
-            let out_type = unsafe { MFCreateMediaType()? };
-            unsafe {
-                out_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
-                out_type.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_H264)?;
-                out_type.SetUINT32(&MF_MT_AVG_BITRATE, bitrate)?;
-                out_type.SetUINT32(&MF_MT_MPEG2_PROFILE, 100)?;
-                out_type.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
-                out_type.SetUINT64(&MF_MT_FRAME_SIZE, pack2(out_w, out_h))?;
-                out_type.SetUINT64(&MF_MT_FRAME_RATE, pack2(fps, 1))?;
-                out_type.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, pack2(1, 1))?;
-            }
-            let stream = unsafe { writer.AddStream(&out_type)? };
-
-            let in_type = unsafe { MFCreateMediaType()? };
-            unsafe {
-                in_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
-                in_type.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_ARGB32)?;
-                in_type.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
-                in_type.SetUINT64(&MF_MT_FRAME_SIZE, pack2(in_w, in_h))?;
-                in_type.SetUINT64(&MF_MT_FRAME_RATE, pack2(fps, 1))?;
-                in_type.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, pack2(1, 1))?;
-                writer.SetInputMediaType(stream, &in_type, None)?;
-            }
-
-            // PCM crudo de entrada: el SinkWriter resuelve su propio MFT AAC, igual que
-            // ya resuelve el MFT H.264 a partir del tipo de vídeo declarado arriba.
-            let sys_audio_stream = match sys_audio {
-                Some((rate, ch)) => Some(add_aac_stream(&writer, rate, ch)?),
-                None => None,
-            };
-            let mic_audio_stream = match mic_audio {
-                Some((rate, ch)) => Some(add_aac_stream(&writer, rate, ch)?),
-                None => None,
-            };
-
-            // Misma política de calidad que el replay (VBR + CABAC + GOP ~2 s) sobre el
-            // encoder que hospeda el SinkWriter. El encoder NO tiene por qué ser el primer
-            // transform del stream: con entrada ARGB32 el SinkWriter intercala un conversor
-            // de color, así que recorremos los transforms y aplicamos a los que expongan
-            // ICodecAPI. El conversor ignora las propiedades de encoder (best-effort). Se
-            // hace antes de BeginWriting, cuando la cadena ya está resuelta.
-            //
-            // NO re-aplicar SetOutputType aquí para forzar el VBR: manipular a mano el tipo de
-            // salida del encoder de vídeo antes de BeginWriting corrompe la resolución diferida
-            // de los streams de audio del SinkWriter, y el primer WriteSample de audio falla con
-            // MF_E_TRANSFORM_TYPE_NOT_SET. El VBR queda como best-effort vía SetValue (el audio,
-            // función principal, tiene prioridad sobre esa mejora de calidad).
-            if let Ok(ex) = writer.cast::<IMFSinkWriterEx>() {
-                for idx in 0..8u32 {
-                    let mut transform: Option<IMFTransform> = None;
-                    if unsafe { ex.GetTransformForStream(stream, idx, None, &mut transform) }.is_err()
-                    {
-                        break;
-                    }
-                    let Some(t) = transform else { continue };
-                    let Ok(codec) = t.cast::<ICodecAPI>() else { continue };
-                    let gop = (fps * 2).max(16);
-                    let failed = set_quality_codec_settings(&codec, bitrate, gop);
-                    log_encoder_quality(&codec, "manual", bitrate, gop, &failed);
-                }
-            }
-
-            unsafe { writer.BeginWriting()? };
-
-            // Anillo de texturas propias: WGC reutiliza las suyas en cuanto soltamos
-            // el frame, pero el encoder es asíncrono y puede leerlas más tarde; copiar
-            // a una textura nuestra (rotando varias) evita esa carrera. Van a resolución
-            // de captura (in_*): el escalado a out_* lo hace el SinkWriter.
-            let desc = D3D11_TEXTURE2D_DESC {
-                Width: in_w,
-                Height: in_h,
-                MipLevels: 1,
-                ArraySize: 1,
-                Format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                SampleDesc: DXGI_SAMPLE_DESC {
-                    Count: 1,
-                    Quality: 0,
-                },
-                Usage: D3D11_USAGE_DEFAULT,
-                BindFlags: (D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE).0 as u32,
-                CPUAccessFlags: D3D11_CPU_ACCESS_FLAG(0).0 as u32,
-                MiscFlags: D3D11_RESOURCE_MISC_FLAG(0).0 as u32,
-            };
-            let mut pool = Vec::with_capacity(6);
-            for _ in 0..6 {
-                let mut t: Option<ID3D11Texture2D> = None;
-                unsafe { device.CreateTexture2D(&desc, None, Some(&mut t))? };
-                pool.push(t.ok_or_else(null_out)?);
-            }
-
-            Ok(Encoder {
-                writer,
-                stream,
-                sys_audio_stream,
-                mic_audio_stream,
-                ctx,
-                pool,
-                next: 0,
-                latest: None,
-                base: 0,
-                has_base: false,
-                last_time: 0,
-                path,
-                finalized: false,
-                audio_err_logged: false,
-            })
-        }
-
-        // El audio no se ancla a keyframes: cada paquete AAC es independiente. La base de
-        // tiempo la fija siempre el primer frame de vídeo (note_frame), porque el PTS del
-        // vídeo es sintético (cadencia CFR) y arranca en 0 en ese instante; el audio se
-        // rebasa contra esa misma base. Mientras no haya base aún se descartan los paquetes
-        // (no hay forma fiable de alinearlos), igual que en el Instant Replay.
-        fn push_audio(&mut self, stream: u32, data: Vec<u8>, time: i64, dur: i64) {
-            if !self.has_base {
-                return;
-            }
-            let ts = (time - self.base).max(0);
-            let len = data.len();
-            let Ok(mf_buf) = (unsafe { MFCreateMemoryBuffer(len as u32) }) else {
-                return;
-            };
-            let ok = unsafe {
-                let mut ptr: *mut u8 = std::ptr::null_mut();
-                if mf_buf.Lock(&mut ptr, None, None).is_err() {
-                    false
-                } else {
-                    std::ptr::copy_nonoverlapping(data.as_ptr(), ptr, len);
-                    let _ = mf_buf.Unlock();
-                    mf_buf.SetCurrentLength(len as u32).is_ok()
-                }
-            };
-            if !ok {
-                return;
-            }
-            let Ok(sample) = (unsafe { MFCreateSample() }) else {
-                return;
-            };
-            unsafe {
-                let _ = sample.AddBuffer(&mf_buf);
-                let _ = sample.SetSampleTime(ts);
-                let _ = sample.SetSampleDuration(dur);
-                if let Err(e) = self.writer.WriteSample(stream, &sample) {
-                    if !self.audio_err_logged {
-                        self.audio_err_logged = true;
-                        eprintln!("audio (grabación manual): WriteSample del audio falló: {e:?}");
-                    }
-                }
-            }
-        }
-
-        // Copia el frame WGC a un slot del pool (GPU→GPU, sin bajar a CPU: el camino sagrado)
-        // y lo marca como el "último" disponible. NO codifica aquí: el hilo de cadencia decide
-        // cuándo emitirlo. El primer frame fija la base temporal del vídeo, contra la que se
-        // rebasa el audio. Solo rota a un slot nuevo; el anterior sigue intacto para que la
-        // cadencia pueda duplicarlo mientras no llegue otro frame.
-        fn note_frame(&mut self, src: &ID3D11Texture2D, time: i64) {
-            if !self.has_base {
-                self.has_base = true;
-                self.base = time;
-            }
-            self.last_time = time;
-            let idx = self.next;
-            self.next = (self.next + 1) % self.pool.len();
-            unsafe { self.ctx.CopyResource(&self.pool[idx], src) };
-            self.latest = Some(idx);
-        }
-
-        // Slot CFR del último frame real por su timestamp (base = primer frame). None si aún no
-        // llegó ninguno. La cadencia se guía por esto, no por el reloj de pared (sin batido).
-        fn latest_slot(&self, interval: i64) -> Option<i64> {
-            self.latest.map(|_| time_slot(self.last_time, self.base, interval))
-        }
-
-        // Escribe el último frame disponible con un PTS sintético de cadencia constante. Se
-        // llama una vez por slot vencido; un slot sin frame nuevo reescribe el mismo (frame
-        // duplicado), que el encoder resuelve como P-frame "skip" de coste ínfimo.
-        fn emit_paced(&mut self, pts: i64, dur: i64) -> Result<()> {
-            let Some(idx) = self.latest else {
-                return Ok(());
-            };
-            let dst = self.pool[idx].clone();
-            let buffer =
-                unsafe { MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, &dst, 0, false)? };
-            let len = unsafe { buffer.cast::<IMF2DBuffer>()?.GetContiguousLength()? };
-            unsafe { buffer.SetCurrentLength(len)? };
-
-            let sample = unsafe { MFCreateSample()? };
-            unsafe {
-                sample.AddBuffer(&buffer)?;
-                sample.SetSampleTime(pts)?;
-                sample.SetSampleDuration(dur.max(1))?;
-                self.writer.WriteSample(self.stream, &sample)?;
-            }
-            Ok(())
-        }
-
-        fn finalize(&mut self) -> Option<String> {
-            if self.finalized {
-                return Some(self.path.clone());
-            }
-            self.finalized = true;
-            unsafe { self.writer.Finalize().ok()? };
-            Some(self.path.clone())
-        }
-    }
-
-    // ===================== INSTANT REPLAY (Fase 2b) =====================
+    // ===================== PIPELINE DE CODIFICACIÓN (replay + manual) =====================
     //
-    // A diferencia de la grabación manual (Fase 2a, que delega en IMFSinkWriter y no
-    // expone los paquetes), aquí poseemos el MFT del encoder H.264 por hardware para
-    // tee-ar sus paquetes ya codificados a un ring buffer en RAM. Como los encoders HW
-    // comen NV12, intercalamos el Video Processor MFT (BGRA→NV12 en GPU). Se codifica
-    // siempre en segundo plano con IDR forzado periódico; al guardar, se muxea desde el
-    // último IDR a un MP4 con un sink writer en passthrough (sin recodificar).
+    // Poseemos el MFT del encoder H.264 por hardware para tee-ar sus paquetes ya codificados a un
+    // VideoPacketSink. Como los encoders HW comen NV12, intercalamos el Video Processor MFT
+    // (BGRA→NV12 en GPU). El Instant Replay envía los paquetes a un ring buffer en RAM (guardado
+    // bajo demanda) y la grabación manual a un muxer en directo (LiveMux); ambos comparten
+    // build_pipeline_core y el bombeo. Se muxea siempre en passthrough (sin recodificar).
 
     const CLSID_VIDEO_PROCESSOR_MFT: GUID = GUID::from_u128(0x88753b26_5b24_49bd_b2e7_0c445c78c982);
 
@@ -1518,6 +1014,33 @@ mod win {
         height: u32,
     }
 
+    // Device D3D11 con soporte BGRA (obligatorio para el interop de WGC) y de vídeo (lo exige
+    // Media Foundation para codificar por hardware compartiendo el device), más su equivalente
+    // WinRT IDirect3DDevice, que es lo que consume el frame pool.
+    fn create_device() -> Result<(ID3D11Device, IDirect3DDevice)> {
+        let mut device: Option<ID3D11Device> = None;
+        unsafe {
+            D3D11CreateDevice(
+                None,
+                D3D_DRIVER_TYPE_HARDWARE,
+                HMODULE::default(),
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+                None,
+                D3D11_SDK_VERSION,
+                Some(&mut device),
+                None,
+                None,
+            )?;
+        }
+        let device = device.expect("D3D11CreateDevice no devolvió device");
+        let dxgi: IDXGIDevice = device.cast()?;
+        // Prioridad de scheduling GPU máxima para este device (dentro de nuestro proceso).
+        let _ = unsafe { dxgi.SetGPUThreadPriority(7) };
+        let inspectable = unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi)? };
+        let d3d_device: IDirect3DDevice = inspectable.cast()?;
+        Ok((device, d3d_device))
+    }
+
     // Núcleo del pipeline de codificación compartido por el Instant Replay y la grabación
     // manual: WGC + conversor + encoder + bombeo. La diferencia entre modos es solo el destino
     // de los paquetes (ring buffer vs muxer en directo) y las pistas de audio, que cablea cada
@@ -1541,6 +1064,9 @@ mod win {
         encoder_pref: &str,
         window_mode: bool,
         card_text: Option<&str>,
+        // El Instant Replay reconstruye el pipeline si la ventana cambia de tamaño; la grabación
+        // manual no (mantiene el tamaño inicial, WGC recorta), así que desactiva la detección.
+        detect_resize: bool,
     ) -> Result<PipelineCore> {
         ensure_mf();
         let (device, d3d_device) = create_device()?;
@@ -1664,12 +1190,14 @@ mod win {
                         if let Ok(s) = frame.ContentSize() {
                             stats.width.store(s.Width.max(0) as u32, Ordering::Relaxed);
                             stats.height.store(s.Height.max(0) as u32, Ordering::Relaxed);
-                            let cw = (s.Width.max(0) as u32) & !1;
-                            let ch = (s.Height.max(0) as u32) & !1;
-                            if cw >= 2 && ch >= 2 && (cw != width || ch != height) {
-                                size_changed_h.store(true, Ordering::Relaxed);
-                                let _ = frame.Close();
-                                return Ok(());
+                            if detect_resize {
+                                let cw = (s.Width.max(0) as u32) & !1;
+                                let ch = (s.Height.max(0) as u32) & !1;
+                                if cw >= 2 && ch >= 2 && (cw != width || ch != height) {
+                                    size_changed_h.store(true, Ordering::Relaxed);
+                                    let _ = frame.Close();
+                                    return Ok(());
+                                }
                             }
                         }
                         let t = frame.SystemRelativeTime().map(|x| x.Duration).unwrap_or(0);
@@ -1807,7 +1335,7 @@ mod win {
 
         let core = build_pipeline_core(
             stats, item, fps, factor, resolution, bitrate_override, encoder_pref, window_mode,
-            Some(card_text),
+            Some(card_text), true,
         )?;
         let PipelineCore { mut pipe, out_w, out_h, bitrate, video_base } = core;
 
@@ -1859,6 +1387,76 @@ mod win {
         }
         pipe.audio_tracks = audio_tracks;
         Ok(pipe)
+    }
+
+    // Grabación manual: monta el núcleo del pipeline hacia un muxer en directo (LiveMux) y cablea
+    // las pistas de audio con MuxAudioSink (AAC directo al muxer). Devuelve el pipeline, el muxer
+    // (para Finalize al parar) y el sink de vídeo (que consume el pump). window_mode=false: sin
+    // cartel ni resize (funciones exclusivas del Instant Replay).
+    #[allow(clippy::too_many_arguments)]
+    fn build_manual(
+        stats: &Arc<Stats>,
+        item: GraphicsCaptureItem,
+        out_dir: &str,
+        fps: u32,
+        factor: f64,
+        resolution: u32,
+        bitrate_override: u32,
+        mic: bool,
+        mic_device: String,
+        encoder_pref: &str,
+    ) -> Result<(ReplayPipeline, Arc<LiveMux>, Arc<dyn VideoPacketSink>)> {
+        let sys_native = audio::probe_format(&audio::TrackKind::SystemLoopback);
+        let mic_native = if mic && !mic_device.is_empty() {
+            let f = audio::probe_format(&audio::TrackKind::Microphone(mic_device.clone()));
+            if f.is_none() {
+                eprintln!("audio: no se pudo abrir el micrófono (device='{mic_device}')");
+            }
+            f
+        } else {
+            if mic {
+                eprintln!("audio: micrófono activado pero sin dispositivo seleccionado");
+            }
+            None
+        };
+        let sys_target = sys_native.and_then(|(r, c)| audio::aac_target_format(r, c));
+        let mic_target = mic_native.and_then(|(r, c)| audio::aac_target_format(r, c));
+
+        let core = build_pipeline_core(
+            stats, item, fps, factor, resolution, bitrate_override, encoder_pref, false, None, false,
+        )?;
+        let PipelineCore { mut pipe, out_w, out_h, bitrate, video_base } = core;
+
+        let out_path = format!("{out_dir}\\{}", clip_filename());
+        let mux = LiveMux::new(out_path, out_w, out_h, fps, bitrate, sys_target, mic_target);
+
+        let mut audio_tracks = Vec::new();
+        if let (Some((rate, ch)), Some((_, dst_ch))) = (sys_native, sys_target) {
+            let sink = Arc::new(MuxAudioSink::new(mux.clone(), AudioRole::Sys, video_base.clone()));
+            audio_tracks.push(audio::spawn_track(
+                audio::TrackKind::SystemLoopback,
+                audio::Encoding::Aac(aac_bitrate(dst_ch)),
+                rate,
+                ch,
+                sink,
+                None,
+            ));
+        }
+        if let (Some((rate, ch)), Some((_, dst_ch))) = (mic_native, mic_target) {
+            let sink = Arc::new(MuxAudioSink::new(mux.clone(), AudioRole::Mic, video_base.clone()));
+            audio_tracks.push(audio::spawn_track(
+                audio::TrackKind::Microphone(mic_device.clone()),
+                audio::Encoding::Aac(aac_bitrate(dst_ch)),
+                rate,
+                ch,
+                sink,
+                None,
+            ));
+        }
+        pipe.audio_tracks = audio_tracks;
+
+        let video_sink: Arc<dyn VideoPacketSink> = mux.clone();
+        Ok((pipe, mux, video_sink))
     }
 
     // true si el device D3D se perdió (TDR, reset de GPU, driver reiniciado). Se consulta solo
@@ -2122,50 +1720,6 @@ mod win {
             96_000
         } else {
             128_000
-        }
-    }
-
-    // Declara un stream de audio en el SinkWriter: entrada PCM16 cruda, salida AAC. El
-    // SinkWriter resuelve su propio MFT AAC a partir de estos tipos, igual que ya hace
-    // con el H.264 de vídeo (ver Encoder::new). El encoder selecciona por
-    // MF_MT_AUDIO_AVG_BYTES_PER_SECOND (no por MF_MT_AVG_BITRATE), de ahí ese atributo.
-    fn add_aac_stream(writer: &IMFSinkWriter, sample_rate: u32, channels: u16) -> Result<u32> {
-        let out_type = unsafe { MFCreateMediaType()? };
-        unsafe {
-            out_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)?;
-            out_type.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_AAC)?;
-            out_type.SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, sample_rate)?;
-            out_type.SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, channels as u32)?;
-            out_type.SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16)?;
-            out_type.SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, aac_bitrate(channels) / 8)?;
-            out_type.SetUINT32(&MF_MT_AAC_PAYLOAD_TYPE, 0)?;
-        }
-        let stream = unsafe { writer.AddStream(&out_type)? };
-
-        let in_type = unsafe { MFCreateMediaType()? };
-        unsafe {
-            in_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)?;
-            in_type.SetGUID(&MF_MT_SUBTYPE, &MFAudioFormat_PCM)?;
-            in_type.SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, sample_rate)?;
-            in_type.SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, channels as u32)?;
-            in_type.SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16)?;
-            in_type.SetUINT32(&MF_MT_AUDIO_BLOCK_ALIGNMENT, channels as u32 * 2)?;
-            in_type.SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, sample_rate * channels as u32 * 2)?;
-            writer.SetInputMediaType(stream, &in_type, None)?;
-        }
-        Ok(stream)
-    }
-
-    // Sink que envuelve el Arc<Mutex<Encoder>> de grabación manual: el mismo mutex que
-    // ya serializa el push de vídeo serializa también el de audio.
-    struct EncoderAudioSink {
-        encoder: Arc<Mutex<Encoder>>,
-        stream: u32,
-    }
-
-    impl audio::AudioSink for EncoderAudioSink {
-        fn push(&self, data: Vec<u8>, time: i64, dur: i64) {
-            self.encoder.lock().unwrap().push_audio(self.stream, data, time, dur);
         }
     }
 
