@@ -3072,22 +3072,7 @@ mod win {
         let writer =
             unsafe { MFCreateSinkWriterFromURL(PCWSTR::null(), &byte_stream, &attrs)? };
 
-        let h264 = unsafe { MFCreateMediaType()? };
-        unsafe {
-            h264.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
-            h264.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_H264)?;
-            h264.SetUINT32(&MF_MT_AVG_BITRATE, bitrate)?;
-            h264.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
-            h264.SetUINT64(&MF_MT_FRAME_SIZE, pack2(width, height))?;
-            h264.SetUINT64(&MF_MT_FRAME_RATE, pack2(fps, 1))?;
-            h264.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, pack2(1, 1))?;
-            if !seq_header.is_empty() {
-                h264.SetBlob(&MF_MT_MPEG_SEQUENCE_HEADER, seq_header)?;
-            }
-        }
-        let stream = unsafe { writer.AddStream(&h264)? };
-        // Passthrough: el input del stream es el mismo H.264 ya codificado.
-        unsafe { writer.SetInputMediaType(stream, &h264, None)? };
+        let stream = add_h264_passthrough_stream(&writer, seq_header, width, height, fps, bitrate)?;
 
         // Sys se declara primero para que sea la pista de audio por defecto.
         let sys_stream = sys_audio
@@ -3144,6 +3129,34 @@ mod win {
 
         unsafe { writer.Finalize()? };
         Ok(())
+    }
+
+    // Declara el stream de vídeo en passthrough (entrada == salida, H.264 ya codificado). El
+    // SPS/PPS viaja en MF_MT_MPEG_SEQUENCE_HEADER para que el sink MP4 escriba el `avcC`.
+    fn add_h264_passthrough_stream(
+        writer: &IMFSinkWriter,
+        seq_header: &[u8],
+        width: u32,
+        height: u32,
+        fps: u32,
+        bitrate: u32,
+    ) -> Result<u32> {
+        let h264 = unsafe { MFCreateMediaType()? };
+        unsafe {
+            h264.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
+            h264.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_H264)?;
+            h264.SetUINT32(&MF_MT_AVG_BITRATE, bitrate)?;
+            h264.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
+            h264.SetUINT64(&MF_MT_FRAME_SIZE, pack2(width, height))?;
+            h264.SetUINT64(&MF_MT_FRAME_RATE, pack2(fps, 1))?;
+            h264.SetUINT64(&MF_MT_PIXEL_ASPECT_RATIO, pack2(1, 1))?;
+            if !seq_header.is_empty() {
+                h264.SetBlob(&MF_MT_MPEG_SEQUENCE_HEADER, seq_header)?;
+            }
+        }
+        let stream = unsafe { writer.AddStream(&h264)? };
+        unsafe { writer.SetInputMediaType(stream, &h264, None)? };
+        Ok(stream)
     }
 
     // Declara un stream de audio en passthrough (entrada == salida, AAC ya codificado):
