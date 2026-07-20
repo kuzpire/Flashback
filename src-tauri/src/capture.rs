@@ -730,6 +730,12 @@ mod win {
             // de color, así que recorremos los transforms y aplicamos a los que expongan
             // ICodecAPI. El conversor ignora las propiedades de encoder (best-effort). Se
             // hace antes de BeginWriting, cuando la cadena ya está resuelta.
+            //
+            // NO re-aplicar SetOutputType aquí para forzar el VBR: manipular a mano el tipo de
+            // salida del encoder de vídeo antes de BeginWriting corrompe la resolución diferida
+            // de los streams de audio del SinkWriter, y el primer WriteSample de audio falla con
+            // MF_E_TRANSFORM_TYPE_NOT_SET. El VBR queda como best-effort vía SetValue (el audio,
+            // función principal, tiene prioridad sobre esa mejora de calidad).
             if let Ok(ex) = writer.cast::<IMFSinkWriterEx>() {
                 for idx in 0..8u32 {
                     let mut transform: Option<IMFTransform> = None;
@@ -741,17 +747,6 @@ mod win {
                     let Ok(codec) = t.cast::<ICodecAPI>() else { continue };
                     let gop = (fps * 2).max(16);
                     let failed = set_quality_codec_settings(&codec, bitrate, gop);
-                    // El SinkWriter ya fijó el tipo de salida del encoder, así que el modo VBR
-                    // no "prende" con solo SetValue (a diferencia del replay, donde lo fijamos
-                    // antes de SetOutputType). Solo sobre el encoder real (aceptó RateControlMode),
-                    // re-aplicamos el MISMO tipo de salida tras fijar el rate control para que lo
-                    // relea. Pre-BeginWriting y con el tipo idéntico, el tipo de entrada se
-                    // conserva. Best-effort: si falla, queda en CBR sin romper la grabación.
-                    if !failed.contains(&"RateControlMode") {
-                        if let Ok(cur) = unsafe { t.GetOutputCurrentType(0) } {
-                            let _ = unsafe { t.SetOutputType(0, &cur, 0) };
-                        }
-                    }
                     log_encoder_quality(&codec, "manual", bitrate, gop, &failed);
                 }
             }
