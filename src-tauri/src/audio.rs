@@ -39,7 +39,6 @@ pub enum TrackKind {
 }
 
 pub enum Encoding {
-    Pcm,
     Aac(u32),
 }
 
@@ -267,7 +266,6 @@ fn run_track_loop(
                 return Err(e);
             }
         },
-        Encoding::Pcm => None,
     };
 
     unsafe { client.Start()? };
