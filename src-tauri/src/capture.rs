@@ -1518,21 +1518,30 @@ mod win {
         height: u32,
     }
 
+    // Núcleo del pipeline de codificación compartido por el Instant Replay y la grabación
+    // manual: WGC + conversor + encoder + bombeo. La diferencia entre modos es solo el destino
+    // de los paquetes (ring buffer vs muxer en directo) y las pistas de audio, que cablea cada
+    // llamador. audio_tracks vuelve vacío; el llamador lo rellena.
+    struct PipelineCore {
+        pipe: ReplayPipeline,
+        out_w: u32,
+        out_h: u32,
+        bitrate: u32,
+        video_base: Arc<AtomicI64>,
+    }
+
     #[allow(clippy::too_many_arguments)]
-    fn build_replay(
-        buffer: &Arc<Mutex<ReplayBuffer>>,
+    fn build_pipeline_core(
         stats: &Arc<Stats>,
         item: GraphicsCaptureItem,
         fps: u32,
         factor: f64,
         resolution: u32,
         bitrate_override: u32,
-        mic: bool,
-        mic_device: String,
         encoder_pref: &str,
         window_mode: bool,
-        card_text: &str,
-    ) -> Result<ReplayPipeline> {
+        card_text: Option<&str>,
+    ) -> Result<PipelineCore> {
         ensure_mf();
         let (device, d3d_device) = create_device()?;
         // NV12/H.264 exigen dimensiones PARES. La ventana de un juego puede tener tamaño
@@ -1547,41 +1556,6 @@ mod win {
         // la resolución codificada y guardada. El bitrate se calcula sobre la salida.
         let (out_w, out_h) = output_dims(width, height, resolution);
         let bitrate = resolve_bitrate(out_w, out_h, fps, factor, bitrate_override);
-
-        // Sistema: loopback siempre; micrófono solo si el toggle está activo y hay
-        // dispositivo elegido (igual que en build_engine, grabación manual). El ring buffer
-        // y el mux se declaran con el formato AAC admisible (downmix a estéreo).
-        let sys_native = audio::probe_format(&audio::TrackKind::SystemLoopback);
-        let mic_native = if mic && !mic_device.is_empty() {
-            let f = audio::probe_format(&audio::TrackKind::Microphone(mic_device.clone()));
-            if f.is_none() {
-                eprintln!("audio: no se pudo abrir el micrófono (device='{mic_device}')");
-            }
-            f
-        } else {
-            if mic {
-                eprintln!("audio: micrófono activado pero sin dispositivo seleccionado");
-            }
-            None
-        };
-        let sys_target = sys_native.and_then(|(r, c)| audio::aac_target_format(r, c));
-        let mic_target = mic_native.and_then(|(r, c)| audio::aac_target_format(r, c));
-
-        {
-            let mut b = buffer.lock().unwrap();
-            // Si la ventana cambió de tamaño (rebuild por resize), los paquetes ya en el ring
-            // tienen otra resolución/SPS y no se pueden muxear junto a los nuevos: se descartan.
-            // En una reconexión sin cambio de tamaño no entra aquí y el buffer se conserva.
-            if b.width != out_w || b.height != out_h {
-                b.packets.clear();
-                b.seq_header.clear();
-            }
-            b.width = out_w;
-            b.height = out_h;
-            b.fps = fps;
-            b.bitrate = bitrate;
-            b.init_audio(sys_target, mic_target);
-        }
 
         // Device manager compartido (zero-copy GPU) y device protegido para multihilo.
         let mut token = 0u32;
@@ -1688,6 +1662,8 @@ mod win {
                 if let Some(pool) = pool.as_ref() {
                     if let Ok(frame) = pool.TryGetNextFrame() {
                         if let Ok(s) = frame.ContentSize() {
+                            stats.width.store(s.Width.max(0) as u32, Ordering::Relaxed);
+                            stats.height.store(s.Height.max(0) as u32, Ordering::Relaxed);
                             let cw = (s.Width.max(0) as u32) & !1;
                             let ch = (s.Height.max(0) as u32) & !1;
                             if cw >= 2 && ch >= 2 && (cw != width || ch != height) {
@@ -1735,11 +1711,120 @@ mod win {
             }
         }
 
-        // Pistas de audio: se codifican a AAC ya en el hilo de captura de audio y se
-        // empujan directamente al ring buffer (no pasan por el SinkWriter, a diferencia
-        // de la grabación manual). Se rebasan contra `video_base`, que fija el propio
-        // bombeo de vídeo (run_pump_async/sync) en cuanto llega el primer frame.
+        // Origen temporal del vídeo (escala WGC): lo fija el bombeo al emitir el primer frame.
+        // Las pistas de audio (que cablea el llamador) se rebasan contra él para compartir el cero.
         let video_base = Arc::new(AtomicI64::new(i64::MIN));
+
+        // Cartel "fuera de foco": solo en modo ventana con texto (el Instant Replay lo usa; la
+        // grabación manual pasa None). Si Direct2D falla, se sigue sin cartel.
+        let card = if let (true, Some(text)) = (window_mode, card_text) {
+            match crate::overlay::OutOfFocusCard::new(&device, width, height, text) {
+                Ok(overlay) => {
+                    let tex = create_bgra_textures(&device, width, height, 1)?
+                        .into_iter()
+                        .next()
+                        .ok_or_else(null_out)?;
+                    Some(Card { overlay, tex })
+                }
+                Err(e) => {
+                    eprintln!("overlay: no se pudo crear el cartel de fuera de foco: {e:?}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        // Se resuelve una sola vez aquí (fuera del hilo de bombeo): la ventana principal del
+        // juego es estable mientras exista; minimizar/restaurar no cambia su HWND.
+        let game_hwnd = if window_mode {
+            resolve_game_window().map(|h| h.0 as isize).unwrap_or(0)
+        } else {
+            0
+        };
+
+        session.StartCapture()?;
+
+        let pipe = ReplayPipeline {
+            _device: device,
+            _manager: manager,
+            fps,
+            converter,
+            encoder,
+            enc_events,
+            nv12_pool,
+            nv12_next: std::cell::Cell::new(0),
+            converter_provides,
+            sw,
+            frame_pool,
+            session,
+            token,
+            rx,
+            feed,
+            video_base: video_base.clone(),
+            audio_tracks: Vec::new(),
+            card,
+            game_hwnd,
+            size_changed,
+            device_lost: Arc::new(AtomicBool::new(false)),
+            retarget: Arc::new(AtomicBool::new(false)),
+        };
+        Ok(PipelineCore { pipe, out_w, out_h, bitrate, video_base })
+    }
+
+    // Instant Replay: monta el núcleo del pipeline hacia el ring buffer y cablea las pistas de
+    // audio con ReplayAudioSink (AAC directo al ring, rebasado contra video_base).
+    #[allow(clippy::too_many_arguments)]
+    fn build_replay(
+        buffer: &Arc<Mutex<ReplayBuffer>>,
+        stats: &Arc<Stats>,
+        item: GraphicsCaptureItem,
+        fps: u32,
+        factor: f64,
+        resolution: u32,
+        bitrate_override: u32,
+        mic: bool,
+        mic_device: String,
+        encoder_pref: &str,
+        window_mode: bool,
+        card_text: &str,
+    ) -> Result<ReplayPipeline> {
+        // Sistema: loopback siempre; micrófono solo si el toggle está activo y hay dispositivo.
+        let sys_native = audio::probe_format(&audio::TrackKind::SystemLoopback);
+        let mic_native = if mic && !mic_device.is_empty() {
+            let f = audio::probe_format(&audio::TrackKind::Microphone(mic_device.clone()));
+            if f.is_none() {
+                eprintln!("audio: no se pudo abrir el micrófono (device='{mic_device}')");
+            }
+            f
+        } else {
+            if mic {
+                eprintln!("audio: micrófono activado pero sin dispositivo seleccionado");
+            }
+            None
+        };
+        let sys_target = sys_native.and_then(|(r, c)| audio::aac_target_format(r, c));
+        let mic_target = mic_native.and_then(|(r, c)| audio::aac_target_format(r, c));
+
+        let core = build_pipeline_core(
+            stats, item, fps, factor, resolution, bitrate_override, encoder_pref, window_mode,
+            Some(card_text),
+        )?;
+        let PipelineCore { mut pipe, out_w, out_h, bitrate, video_base } = core;
+
+        {
+            let mut b = buffer.lock().unwrap();
+            // Si la ventana cambió de tamaño (rebuild por resize), los paquetes ya en el ring
+            // tienen otra resolución/SPS y no se pueden muxear junto a los nuevos: se descartan.
+            if b.width != out_w || b.height != out_h {
+                b.packets.clear();
+                b.seq_header.clear();
+            }
+            b.width = out_w;
+            b.height = out_h;
+            b.fps = fps;
+            b.bitrate = bitrate;
+            b.init_audio(sys_target, mic_target);
+        }
 
         let mut audio_tracks = Vec::new();
         if let (Some((rate, ch)), Some((_, dst_ch))) = (sys_native, sys_target) {
@@ -1772,60 +1857,8 @@ mod win {
                 None,
             ));
         }
-
-        // Cartel "fuera de foco": solo en modo ventana. Si Direct2D falla por lo que sea, se
-        // sigue sin cartel (se volverá a la pausa: no se codifica nada mientras minimizado).
-        let card = if window_mode {
-            match crate::overlay::OutOfFocusCard::new(&device, width, height, card_text) {
-                Ok(overlay) => {
-                    let tex = create_bgra_textures(&device, width, height, 1)?
-                        .into_iter()
-                        .next()
-                        .ok_or_else(null_out)?;
-                    Some(Card { overlay, tex })
-                }
-                Err(e) => {
-                    eprintln!("overlay: no se pudo crear el cartel de fuera de foco: {e:?}");
-                    None
-                }
-            }
-        } else {
-            None
-        };
-        // Se resuelve una sola vez aquí (fuera del hilo de bombeo): la ventana principal del
-        // juego es estable mientras exista; minimizar/restaurar no cambia su HWND.
-        let game_hwnd = if window_mode {
-            resolve_game_window().map(|h| h.0 as isize).unwrap_or(0)
-        } else {
-            0
-        };
-
-        session.StartCapture()?;
-
-        Ok(ReplayPipeline {
-            _device: device,
-            _manager: manager,
-            fps,
-            converter,
-            encoder,
-            enc_events,
-            nv12_pool,
-            nv12_next: std::cell::Cell::new(0),
-            converter_provides,
-            sw,
-            frame_pool,
-            session,
-            token,
-            rx,
-            feed,
-            video_base,
-            audio_tracks,
-            card,
-            game_hwnd,
-            size_changed,
-            device_lost: Arc::new(AtomicBool::new(false)),
-            retarget: Arc::new(AtomicBool::new(false)),
-        })
+        pipe.audio_tracks = audio_tracks;
+        Ok(pipe)
     }
 
     // true si el device D3D se perdió (TDR, reset de GPU, driver reiniciado). Se consulta solo
