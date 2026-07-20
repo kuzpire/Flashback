@@ -2171,6 +2171,67 @@ mod win {
         }
     }
 
+    // Sink de audio de la grabación manual: entrega los paquetes AAC (ya codificados por
+    // build_aac_encoder, igual que el replay) al muxer en directo. Rebasa contra video_base
+    // como ReplayAudioSink —el PTS de vídeo es CFR sintético con origen en video_base—, así el
+    // audio comparte el cero con el vídeo. La cabecera del AAC (AudioSpecificConfig + payload
+    // type) llega por set_user_data/set_payload_type antes del primer paquete y se reenvía una vez.
+    struct MuxAudioSink {
+        mux: Arc<LiveMux>,
+        role: AudioRole,
+        video_base: Arc<AtomicI64>,
+        user_data: Mutex<Vec<u8>>,
+        payload_type: AtomicU32,
+        header_sent: AtomicBool,
+    }
+
+    impl MuxAudioSink {
+        fn new(mux: Arc<LiveMux>, role: AudioRole, video_base: Arc<AtomicI64>) -> MuxAudioSink {
+            MuxAudioSink {
+                mux,
+                role,
+                video_base,
+                user_data: Mutex::new(Vec::new()),
+                payload_type: AtomicU32::new(0),
+                header_sent: AtomicBool::new(false),
+            }
+        }
+
+        fn maybe_send_header(&self) {
+            if self.header_sent.load(Ordering::SeqCst) {
+                return;
+            }
+            let ud = self.user_data.lock().unwrap().clone();
+            if ud.is_empty() {
+                return;
+            }
+            self.mux
+                .set_audio_header(self.role, ud, self.payload_type.load(Ordering::SeqCst));
+            self.header_sent.store(true, Ordering::SeqCst);
+        }
+    }
+
+    impl audio::AudioSink for MuxAudioSink {
+        fn push(&self, data: Vec<u8>, time: i64, dur: i64) {
+            self.maybe_send_header();
+            let base = self.video_base.load(Ordering::SeqCst);
+            if base == i64::MIN {
+                return;
+            }
+            let ts = (time - base).max(0);
+            self.mux.push_audio(self.role, data, ts, dur);
+        }
+
+        fn set_user_data(&self, data: Vec<u8>) {
+            *self.user_data.lock().unwrap() = data;
+            self.maybe_send_header();
+        }
+
+        fn set_payload_type(&self, v: u32) {
+            self.payload_type.store(v, Ordering::SeqCst);
+        }
+    }
+
     fn run_pump(
         pipe: &ReplayPipeline,
         stop: &Arc<AtomicBool>,
