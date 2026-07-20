@@ -3027,6 +3027,333 @@ mod win {
         out
     }
 
+    // Muxer en directo de la grabación manual: recibe paquetes ya codificados (H.264 + AAC) del
+    // pipeline compartido y los escribe a un MP4 en passthrough al vuelo (a diferencia del replay,
+    // que los guarda en RAM y muxea al final). Un stream passthrough necesita sus cabeceras al
+    // declararse (SPS/PPS del vídeo, AudioSpecificConfig de cada pista), que solo se conocen tras
+    // el primer paquete de cada fuente: por eso hay un handshake que bufferea hasta tenerlas.
+    struct LiveMuxState {
+        writer: Option<IMFSinkWriter>,
+        video_stream: u32,
+        sys_stream: Option<u32>,
+        mic_stream: Option<u32>,
+        base: i64,
+        seq_header: Vec<u8>,
+        sys_hdr: Option<(Vec<u8>, u32)>,
+        mic_hdr: Option<(Vec<u8>, u32)>,
+        pending: Vec<(Option<AudioRole>, Vec<u8>, i64, i64, bool)>,
+        writing: bool,
+        finalized: bool,
+        first_pkt_at: Option<Instant>,
+        failed: bool,
+    }
+
+    struct LiveMux {
+        path: String,
+        width: u32,
+        height: u32,
+        fps: u32,
+        bitrate: u32,
+        // Pistas de audio esperadas (sample_rate, canales) del AAC ya downmezclado; None = ausente.
+        sys: Option<(u32, u16)>,
+        mic: Option<(u32, u16)>,
+        header_timeout: Mutex<Duration>,
+        st: Mutex<LiveMuxState>,
+    }
+
+    // El IMFSinkWriter (COM, !Send/!Sync) vive dentro de `st`; todo acceso pasa por ese Mutex, que
+    // serializa las llamadas del worker de vídeo y de los hilos de audio. Mismo patrón que
+    // ReplayPipeline y el antiguo Encoder de la grabación manual.
+    unsafe impl Send for LiveMux {}
+    unsafe impl Sync for LiveMux {}
+
+    impl LiveMux {
+        fn new(
+            path: String,
+            width: u32,
+            height: u32,
+            fps: u32,
+            bitrate: u32,
+            sys: Option<(u32, u16)>,
+            mic: Option<(u32, u16)>,
+        ) -> Arc<LiveMux> {
+            Arc::new(LiveMux {
+                path,
+                width,
+                height,
+                fps,
+                bitrate,
+                sys,
+                mic,
+                header_timeout: Mutex::new(Duration::from_millis(1000)),
+                st: Mutex::new(LiveMuxState {
+                    writer: None,
+                    video_stream: 0,
+                    sys_stream: None,
+                    mic_stream: None,
+                    base: i64::MIN,
+                    seq_header: Vec::new(),
+                    sys_hdr: None,
+                    mic_hdr: None,
+                    pending: Vec::new(),
+                    writing: false,
+                    finalized: false,
+                    first_pkt_at: None,
+                    failed: false,
+                }),
+            })
+        }
+
+        #[cfg(test)]
+        fn is_writing(&self) -> bool {
+            self.st.lock().unwrap().writing
+        }
+        #[cfg(test)]
+        fn set_header_timeout(&self, d: Duration) {
+            *self.header_timeout.lock().unwrap() = d;
+        }
+
+        fn set_audio_header(&self, role: AudioRole, user_data: Vec<u8>, payload_type: u32) {
+            let mut st = self.st.lock().unwrap();
+            match role {
+                AudioRole::Sys => st.sys_hdr = Some((user_data, payload_type)),
+                AudioRole::Mic => st.mic_hdr = Some((user_data, payload_type)),
+            }
+        }
+
+        fn push_audio(&self, role: AudioRole, data: Vec<u8>, time: i64, dur: i64) {
+            let mut st = self.st.lock().unwrap();
+            if st.finalized || st.failed {
+                return;
+            }
+            st.first_pkt_at.get_or_insert_with(Instant::now);
+            if st.writing {
+                self.write_one(&mut st, Some(role), data, time, dur, false);
+            } else {
+                st.pending.push((Some(role), data, time, dur, false));
+                self.try_begin(&mut st);
+            }
+        }
+
+        // ¿Están todas las cabeceras esperadas, o venció el timeout (fallback que descarta las
+        // pistas de audio que aún no reportaron cabecera, p. ej. un micrófono muerto)?
+        fn headers_ready(&self, st: &LiveMuxState) -> bool {
+            if st.seq_header.is_empty() {
+                return false;
+            }
+            let sys_ok = self.sys.is_none() || st.sys_hdr.is_some();
+            let mic_ok = self.mic.is_none() || st.mic_hdr.is_some();
+            if sys_ok && mic_ok {
+                return true;
+            }
+            let timeout = *self.header_timeout.lock().unwrap();
+            st.first_pkt_at.map(|t| t.elapsed() >= timeout).unwrap_or(false)
+        }
+
+        // Intenta abrir el SinkWriter y volcar lo pendiente. Requiere base (primer keyframe) y
+        // headers_ready().
+        fn try_begin(&self, st: &mut LiveMuxState) {
+            if st.writing || st.failed || st.base == i64::MIN || !self.headers_ready(st) {
+                return;
+            }
+            match self.open_writer(st) {
+                Ok(()) => {
+                    st.writing = true;
+                    let pending = std::mem::take(&mut st.pending);
+                    for (role, data, time, dur, key) in pending {
+                        self.write_one(st, role, data, time, dur, key);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("grabación manual: no se pudo abrir el muxer en directo: {e:?}");
+                    st.failed = true;
+                    st.pending.clear();
+                }
+            }
+        }
+
+        // Crea el SinkWriter passthrough (faststart) y declara los streams disponibles.
+        fn open_writer(&self, st: &mut LiveMuxState) -> Result<()> {
+            let url = HSTRING::from(self.path.as_str());
+            let byte_stream = unsafe {
+                MFCreateFile(
+                    MF_ACCESSMODE_READWRITE,
+                    MF_OPENMODE_DELETE_IF_EXIST,
+                    MF_FILEFLAGS_NONE,
+                    &url,
+                )?
+            };
+            if let Ok(bs_attr) = byte_stream.cast::<IMFAttributes>() {
+                unsafe {
+                    let _ = bs_attr.SetUINT32(&MF_MPEG4SINK_MOOV_BEFORE_MDAT, 1);
+                }
+            }
+            let attrs = unsafe {
+                let mut a: Option<IMFAttributes> = None;
+                MFCreateAttributes(&mut a, 2)?;
+                let a = a.ok_or_else(null_out)?;
+                a.SetUINT32(&MF_SINK_WRITER_DISABLE_THROTTLING, 1)?;
+                a.SetGUID(&MF_TRANSCODE_CONTAINERTYPE, &MFTranscodeContainerType_MPEG4)?;
+                a
+            };
+            let writer = unsafe { MFCreateSinkWriterFromURL(PCWSTR::null(), &byte_stream, &attrs)? };
+
+            let video_stream = add_h264_passthrough_stream(
+                &writer,
+                &st.seq_header,
+                self.width,
+                self.height,
+                self.fps,
+                self.bitrate,
+            )?;
+
+            // Sistema primero (pista de audio por defecto). Solo se declaran las que tienen cabecera.
+            let mut sys_stream = None;
+            if let (Some((rate, ch)), Some((ud, pt))) = (self.sys, st.sys_hdr.clone()) {
+                let track = AudioMuxTrack {
+                    packets: Vec::new(),
+                    sample_rate: rate,
+                    channels: ch,
+                    bitrate: aac_bitrate(ch),
+                    user_data: ud,
+                    payload_type: pt,
+                };
+                sys_stream = Some(add_aac_passthrough_stream(&writer, &track)?);
+            }
+            let mut mic_stream = None;
+            if let (Some((rate, ch)), Some((ud, pt))) = (self.mic, st.mic_hdr.clone()) {
+                let track = AudioMuxTrack {
+                    packets: Vec::new(),
+                    sample_rate: rate,
+                    channels: ch,
+                    bitrate: aac_bitrate(ch),
+                    user_data: ud,
+                    payload_type: pt,
+                };
+                mic_stream = Some(add_aac_passthrough_stream(&writer, &track)?);
+            }
+
+            unsafe { writer.BeginWriting()? };
+            st.writer = Some(writer);
+            st.video_stream = video_stream;
+            st.sys_stream = sys_stream;
+            st.mic_stream = mic_stream;
+            Ok(())
+        }
+
+        // Escribe un sample rebasado a `base`. role=None => vídeo. Descarta audio con time < base
+        // (el contenedor no admite timestamps negativos), igual que el muxer del replay.
+        fn write_one(
+            &self,
+            st: &mut LiveMuxState,
+            role: Option<AudioRole>,
+            data: Vec<u8>,
+            time: i64,
+            dur: i64,
+            key: bool,
+        ) {
+            let Some(writer) = st.writer.clone() else {
+                return;
+            };
+            let ts = time - st.base;
+            if ts < 0 {
+                return;
+            }
+            let stream = match role {
+                None => st.video_stream,
+                Some(AudioRole::Sys) => match st.sys_stream {
+                    Some(s) => s,
+                    None => return,
+                },
+                Some(AudioRole::Mic) => match st.mic_stream {
+                    Some(s) => s,
+                    None => return,
+                },
+            };
+            let Ok(mf_buf) = (unsafe { MFCreateMemoryBuffer(data.len() as u32) }) else {
+                return;
+            };
+            let ok = unsafe {
+                let mut ptr: *mut u8 = std::ptr::null_mut();
+                if mf_buf.Lock(&mut ptr, None, None).is_err() {
+                    false
+                } else {
+                    std::ptr::copy_nonoverlapping(data.as_ptr(), ptr, data.len());
+                    let _ = mf_buf.Unlock();
+                    mf_buf.SetCurrentLength(data.len() as u32).is_ok()
+                }
+            };
+            if !ok {
+                return;
+            }
+            let Ok(sample) = (unsafe { MFCreateSample() }) else {
+                return;
+            };
+            unsafe {
+                let _ = sample.AddBuffer(&mf_buf);
+                let _ = sample.SetSampleTime(ts);
+                let _ = sample.SetSampleDuration(dur);
+                if role.is_none() && key {
+                    let _ = sample.SetUINT32(&MFSampleExtension_CleanPoint, 1);
+                }
+                if writer.WriteSample(stream, &sample).is_err() && !st.failed {
+                    st.failed = true;
+                    eprintln!("grabación manual: WriteSample falló; se detiene el muxer en directo");
+                }
+            }
+        }
+
+        fn finalize(&self) -> Option<String> {
+            let mut st = self.st.lock().unwrap();
+            if st.finalized {
+                return None;
+            }
+            st.finalized = true;
+            let writer = st.writer.take()?;
+            if st.failed {
+                return None;
+            }
+            match unsafe { writer.Finalize() } {
+                Ok(()) => Some(self.path.clone()),
+                Err(e) => {
+                    eprintln!("grabación manual: Finalize del muxer falló: {e:?}");
+                    None
+                }
+            }
+        }
+    }
+
+    impl VideoPacketSink for LiveMux {
+        fn set_seq_header(&self, bytes: Vec<u8>) {
+            let mut st = self.st.lock().unwrap();
+            if st.seq_header.is_empty() {
+                st.seq_header = bytes;
+                self.try_begin(&mut st);
+            }
+        }
+        fn push_video(&self, data: Vec<u8>, time: i64, dur: i64, key: bool) {
+            let mut st = self.st.lock().unwrap();
+            if st.finalized || st.failed {
+                return;
+            }
+            st.first_pkt_at.get_or_insert_with(Instant::now);
+            // El primer keyframe fija la base temporal; antes de él se descarta (un MP4 no puede
+            // empezar fuera de un IDR, igual que save_replay).
+            if st.base == i64::MIN {
+                if !key {
+                    return;
+                }
+                st.base = time;
+            }
+            if st.writing {
+                self.write_one(&mut st, None, data, time, dur, key);
+            } else {
+                st.pending.push((None, data, time, dur, key));
+                self.try_begin(&mut st);
+            }
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn mux_replay(
         path: &str,
@@ -4020,6 +4347,78 @@ mod win {
                 "audio arranca en {earliest_audio} pero el clip se ancla al keyframe {anchor}: \
                  hueco inicial sin audio",
             );
+        }
+
+        // El muxer en directo no debe abrir el SinkWriter hasta tener las cabeceras de vídeo Y de
+        // cada pista de audio esperada. (La validez del MP4 con bitstream H.264/AAC real la cubre
+        // la verificación manual; aquí, con paquetes sintéticos, solo se prueba el handshake.)
+        #[test]
+        fn livemux_waits_for_headers_before_writing() {
+            ensure_mf();
+            let path = std::env::temp_dir()
+                .join("flashback_livemux_test1.mp4")
+                .to_string_lossy()
+                .into_owned();
+            let _ = std::fs::remove_file(&path);
+            let mux = LiveMux::new(path.clone(), 1920, 1080, 30, 4_000_000, Some((48_000, 2)), None);
+
+            mux.set_seq_header(vec![0u8; 32]);
+            mux.push_video(vec![0u8; 64], 0, 333_333, true);
+            assert!(
+                !mux.is_writing(),
+                "no debe arrancar sin la cabecera de la pista de audio esperada"
+            );
+
+            mux.set_audio_header(AudioRole::Sys, vec![0u8; 2], 0);
+            mux.push_audio(AudioRole::Sys, vec![0u8; 16], 0, 213_333);
+            assert!(mux.is_writing(), "con vídeo + cabecera de audio debe estar escribiendo");
+
+            let _ = mux.finalize(); // no se asegura un MP4 válido con datos falsos
+            let _ = std::fs::remove_file(&path);
+        }
+
+        // Si una pista de audio esperada nunca reporta cabecera, el timeout la descarta y el resto
+        // arranca igual (un micrófono muerto no debe bloquear el archivo para siempre).
+        #[test]
+        fn livemux_timeout_drops_missing_audio_track() {
+            ensure_mf();
+            let path = std::env::temp_dir()
+                .join("flashback_livemux_test2.mp4")
+                .to_string_lossy()
+                .into_owned();
+            let _ = std::fs::remove_file(&path);
+            let mux = LiveMux::new(
+                path.clone(),
+                1920,
+                1080,
+                30,
+                4_000_000,
+                Some((48_000, 2)),
+                Some((48_000, 1)),
+            );
+            mux.set_header_timeout(Duration::from_millis(0));
+
+            mux.set_seq_header(vec![0u8; 32]);
+            mux.set_audio_header(AudioRole::Sys, vec![0u8; 2], 0);
+            mux.push_video(vec![0u8; 64], 0, 333_333, true);
+            assert!(
+                mux.is_writing(),
+                "con timeout vencido debe arrancar descartando el micrófono"
+            );
+            // El micrófono sin cabecera quedó descartado: no debe existir su stream.
+            assert!(mux.st.lock().unwrap().mic_stream.is_none());
+
+            let _ = mux.finalize();
+            let _ = std::fs::remove_file(&path);
+        }
+
+        // Sin vídeo no hay base temporal: no se abre archivo y finalize devuelve None.
+        #[test]
+        fn livemux_no_video_returns_none() {
+            ensure_mf();
+            let mux =
+                LiveMux::new("nonexistent.mp4".into(), 1920, 1080, 30, 4_000_000, Some((48_000, 2)), None);
+            assert_eq!(mux.finalize(), None);
         }
     }
 }
