@@ -527,6 +527,21 @@ mod win {
             }
         }
 
+        // Prepara el ring para un nuevo segmento de captura (arranque o rebuild por retarget a
+        // otra ventana / recuperación de device-lost). Cada rebuild reinicia el PTS del pipeline
+        // a ~0; como la poda asume timestamps monótonos, conservar paquetes del segmento anterior
+        // rompería esa invariante y el ring crecería sin límite. El replay significa "últimos N s
+        // de la captura actual": se arranca de cero, igual que el audio (init_audio recrea sus
+        // buffers en cada rebuild).
+        fn begin_segment(&mut self, width: u32, height: u32, fps: u32, bitrate: u32) {
+            self.packets.clear();
+            self.seq_header.clear();
+            self.width = width;
+            self.height = height;
+            self.fps = fps;
+            self.bitrate = bitrate;
+        }
+
         fn track_mut(&mut self, role: AudioRole) -> Option<&mut AudioTrackBuf> {
             match role {
                 AudioRole::Sys => self.sys_audio.as_mut(),
@@ -1341,16 +1356,7 @@ mod win {
 
         {
             let mut b = buffer.lock().unwrap();
-            // Si la ventana cambió de tamaño (rebuild por resize), los paquetes ya en el ring
-            // tienen otra resolución/SPS y no se pueden muxear junto a los nuevos: se descartan.
-            if b.width != out_w || b.height != out_h {
-                b.packets.clear();
-                b.seq_header.clear();
-            }
-            b.width = out_w;
-            b.height = out_h;
-            b.fps = fps;
-            b.bitrate = bitrate;
+            b.begin_segment(out_w, out_h, fps, bitrate);
             b.init_audio(sys_target, mic_target);
         }
 
@@ -3865,6 +3871,36 @@ mod win {
             for k in 0..60i64 {
                 assert_eq!(time_slot(k * iv30, 0, iv), k * 2, "k={k}");
             }
+        }
+
+        #[test]
+        fn rebuild_resets_ring_and_keeps_it_bounded() {
+            let fps = 60u32;
+            let iv = fps_interval(fps);
+            let gop = 60i64; // keyframe cada segundo
+            let mut buf = ReplayBuffer::new(2, 1920, 1080, fps, 0); // ventana 2 s
+            let cap = fps as usize * 4; // holgura sobre la ventana + 1 GOP
+
+            // Segmento 1: 10 s de captura. La poda por tiempo debe acotarlo a ~la ventana.
+            for i in 0..(fps as i64 * 10) {
+                buf.push(vec![0u8; 1000], i * iv, iv, i % gop == 0);
+            }
+            assert!(buf.packets.len() <= cap, "seg1 sin acotar: {}", buf.packets.len());
+
+            // Rebuild a otra ventana con la MISMA resolución: el PTS del nuevo pipeline reinicia a
+            // ~0. begin_segment debe reiniciar el ring; si no, la poda (que asume timestamps
+            // monótonos) deja de disparar y el ring crece sin límite (la fuga de RAM).
+            buf.begin_segment(1920, 1080, fps, 0);
+
+            // Segmento 2: otros 10 s desde t=0.
+            for i in 0..(fps as i64 * 10) {
+                buf.push(vec![0u8; 1000], i * iv, iv, i % gop == 0);
+            }
+            assert!(
+                buf.packets.len() <= cap,
+                "seg2 sin acotar (fuga): {}",
+                buf.packets.len()
+            );
         }
 
         #[test]
