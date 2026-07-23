@@ -269,6 +269,17 @@
     };
   });
 
+  // Autoarranque: en cuanto el clip está listo (metadatos del vídeo cargados y pistas de audio
+  // extraídas) se reproduce solo, sin esperar al usuario. Se rearma al abrir otro clip (cambia src).
+  let autoPlayedSrc: string | null = null;
+  $effect(() => {
+    const src = editorState.videoSrc;
+    if (!src || editorState.loading || !video || kept <= 0) return;
+    if (autoPlayedSrc === src) return;
+    autoPlayedSrc = src;
+    play();
+  });
+
   function seekSource(srcMs: number) {
     if (!video) return;
     const t = srcMs / 1000;
@@ -357,6 +368,15 @@
     else play();
   }
 
+  // Al empezar a arrastrar para buscar (scrub o recorte), pausar: mover el playhead mientras suena
+  // dispara blips de audio en cada frame, molestos y cansinos. Si estaba reproduciendo, se reanuda
+  // al soltar (onWinUp) desde la nueva posición.
+  let resumeAfterSeek = false;
+  function pauseForSeek() {
+    resumeAfterSeek = playing;
+    if (playing) pause();
+  }
+
   function onLoaded() {
     const dMs = (video?.duration || 0) * 1000;
     editorState.durationMs = dMs;
@@ -419,6 +439,7 @@
   // ---- timeline interacción ----
   function onLaneDown(e: MouseEvent) {
     if (e.button !== 0) return;
+    pauseForSeek();
     drag = { kind: 'seek' };
     seekOutput(outFromClientX(e.clientX));
   }
@@ -426,6 +447,7 @@
   function onBlockDown(e: MouseEvent, i: number) {
     if (e.button !== 0) return;
     e.stopPropagation();
+    pauseForSeek();
     selectSegment(i);
     drag = { kind: 'seek' };
     seekOutput(outFromClientX(e.clientX));
@@ -548,6 +570,7 @@
     if (e.button !== 0) return;
     e.stopPropagation();
     e.preventDefault();
+    pauseForSeek();
     selectSegment(i);
     const s = editorState.segments[i];
     drag = { kind: 'trim', index: i, edge, downX: e.clientX, origStart: s.startMs, origEnd: s.endMs };
@@ -558,6 +581,7 @@
     if (e.button !== 0) return;
     e.stopPropagation();
     e.preventDefault();
+    pauseForSeek();
     scrubbing = true;
     drag = { kind: 'seek' };
   }
@@ -714,6 +738,10 @@
     volActive = null;
     trimming = false;
     bubble = null;
+    if (resumeAfterSeek) {
+      resumeAfterSeek = false;
+      play();
+    }
   }
 
   // Pantalla completa vía la ventana NATIVA de Tauri, no la API de fullscreen del navegador:
@@ -786,6 +814,7 @@
     if (e.button !== 0) return;
     e.preventDefault();
     const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+    pauseForSeek();
     drag = { kind: 'fsprog', rect };
     scrubbing = true;
     seekOutput(fsProgFrac(e.clientX, rect) * kept);
