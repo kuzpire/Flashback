@@ -6,7 +6,7 @@
 
 use std::mem::ManuallyDrop;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 
@@ -94,11 +94,18 @@ fn resolve_device(kind: &TrackKind) -> Result<IMMDevice> {
     }?;
     if let Ok(did) = unsafe { device.GetId() } {
         let did = unsafe { did.to_string() }.unwrap_or_default();
-        let label = match kind {
-            TrackKind::SystemLoopback => "sistema",
-            TrackKind::Microphone(_) => "micrófono",
+        let (label, idx) = match kind {
+            TrackKind::SystemLoopback => ("sistema", 0usize),
+            TrackKind::Microphone(_) => ("micrófono", 1usize),
         };
-        eprintln!("audio: dispositivo de {label}: {did}");
+        // El pipeline resuelve el dispositivo en cada rebuild (retarget de ventana, device-lost);
+        // solo se loguea cuando el endpoint cambia de verdad, para no inundar stderr con el mismo ID.
+        static LAST: Mutex<[Option<String>; 2]> = Mutex::new([None, None]);
+        let mut last = LAST.lock().unwrap();
+        if last[idx].as_deref() != Some(did.as_str()) {
+            last[idx] = Some(did.clone());
+            eprintln!("audio: dispositivo de {label}: {did}");
+        }
     }
     Ok(device)
 }

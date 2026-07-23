@@ -2764,10 +2764,10 @@ fn log_encoder_quality(codec: &ICodecAPI, label: &str, mean_bitrate: u32, gop: u
     let mode = unsafe { codec.GetValue(&CODECAPI_AVEncCommonRateControlMode) }
         .ok()
         .map(|v| unsafe { (*v.Anonymous.Anonymous).Anonymous.ulVal });
-    if failed.is_empty() {
+    if real_failed.is_empty() {
         eprintln!("encoder[{label}]: calidad aplicada (VBR mean={mean_bitrate} pico={} gop={gop}); rate control leído={mode:?} (1=VBR)", peak_bitrate(mean_bitrate));
     } else {
-        eprintln!("encoder[{label}]: ajustes rechazados {failed:?}; rate control leído={mode:?} (1=VBR)");
+        eprintln!("encoder[{label}]: ajustes rechazados {real_failed:?}; rate control leído={mode:?} (1=VBR)");
     }
 }
 
