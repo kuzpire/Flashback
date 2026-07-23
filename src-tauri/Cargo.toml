@@ -1,6 +1,6 @@
 [package]
 name = "flashback"
-version = "1.10.1"
+version = "1.11.0"
 description = "Captura y edición ligera de clips de juego para Windows"
 authors = ["Josh Bernal"]
 edition = "2021"
@@ -26,13 +26,23 @@ tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-reqwest = { version = "0.12", features = ["json"] }
+# Solo carátulas/detectables cacheados, nunca en el camino de captura. TLS nativo (schannel)
+# vía native-tls y sin http2/charset para no arrastrar el stack por defecto de reqwest.
+reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls"] }
 base64 = "0.22"
 tokio = { version = "1", features = ["rt"] }
 urlencoding = "2"
 discord-rich-presence = "0.2"
 # time 0.3.48 rompe la coherencia con cookie 0.18.1 (que arrastra Tauri): error E0119.
 time = "=0.3.47"
+
+# Prioridad #1 del proyecto: binario ligero y rápido. panic="unwind" (default) a propósito:
+# el pipeline de captura contiene los panics con catch_unwind para auto-recuperarse (§4.4).
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.61", features = [
